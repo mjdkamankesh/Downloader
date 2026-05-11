@@ -7,6 +7,11 @@ on:
         description: '🔗 YouTube video URL(s) — separate multiple URLs with spaces'
         required: true
         type: string
+      playlist_limit:
+        description: '📋 Max videos from playlist (empty for ALL)'
+        required: false
+        default: ''
+        type: string
       download_subtitles:
         description: '📝 Download subtitles (English & Persian)'
         required: false
@@ -117,6 +122,7 @@ jobs:
           YT_URLS: ${{ github.event.inputs.youtube_urls }}
           YT_QUALITY: ${{ github.event.inputs.quality }}
           YT_PASSWORD: ${{ github.event.inputs.password }}
+          YT_PLAYLIST_LIMIT: ${{ github.event.inputs.playlist_limit }}
           REPO_OWNER_ENV: ${{ github.repository_owner }}
           REPO_NAME_ENV: ${{ github.event.repository.name }}
           BRANCH_ENV: ${{ github.ref_name }}
@@ -128,7 +134,17 @@ jobs:
 
           QUALITY="${YT_QUALITY}"
           ZIP_PASSWORD="${YT_PASSWORD}"
+          PLAYLIST_LIMIT="${YT_PLAYLIST_LIMIT}"
           DOWNLOAD_SUBS="${{ github.event.inputs.download_subtitles }}"
+
+          # Build playlist args
+          if [ -n "$PLAYLIST_LIMIT" ] && [ "$PLAYLIST_LIMIT" -gt 0 ] 2>/dev/null; then
+            PLAYLIST_ARGS="--yes-playlist --playlist-end $PLAYLIST_LIMIT"
+            echo "Playlist mode: YES (max $PLAYLIST_LIMIT videos per playlist)"
+          else
+            PLAYLIST_ARGS="--yes-playlist"
+            echo "Playlist mode: YES (ALL videos)"
+          fi
 
           # REDUCED from 90MB to 45MB - under GitHub's 50MB recommendation
           SPLIT_MB=45
@@ -142,8 +158,7 @@ jobs:
           mkdir -p videos
           > /tmp/video_info.txt
 
-          echo "AVASAM YouTube Downloader"
-          echo "https://avasam.ir"
+          echo "YouTube Downloader"
           echo ""
           echo "Total URLs to download: $TOTAL_URLS"
           echo "Quality: $QUALITY"
@@ -207,11 +222,11 @@ jobs:
             echo "Trying download method $METHOD..."
 
             if [ "$QUALITY" = "audio" ]; then
-              COMMON_FLAGS="--extract-audio --audio-format mp3 --audio-quality 0 --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
+              COMMON_FLAGS="--extract-audio --audio-format mp3 --audio-quality 0 --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part $PLAYLIST_ARGS --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
             elif [ "$QUALITY" = "best" ]; then
-              COMMON_FLAGS="--merge-output-format mp4 --format-sort res,+codec:vp9.1,+size --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
+              COMMON_FLAGS="--merge-output-format mp4 --format-sort res,+codec:vp9.1,+size --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part $PLAYLIST_ARGS --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
             else
-              COMMON_FLAGS="--merge-output-format mp4 --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
+              COMMON_FLAGS="--merge-output-format mp4 --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part $PLAYLIST_ARGS --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
             fi
 
             case $METHOD in
@@ -329,6 +344,7 @@ jobs:
           echo "$FORMAT" > /tmp/yt_format.txt
           echo "$QUALITY" > /tmp/yt_quality.txt
           echo "$ZIP_PASSWORD" > /tmp/yt_password.txt
+          echo "$PLAYLIST_ARGS" > /tmp/yt_playlist_args.txt
           echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
           echo "$REPO_OWNER_ENV" > /tmp/yt_repo_owner.txt
           echo "$REPO_NAME_ENV" > /tmp/yt_repo_name.txt
@@ -341,6 +357,7 @@ jobs:
           FORMAT=$(cat /tmp/yt_format.txt)
           QUALITY=$(cat /tmp/yt_quality.txt)
           ZIP_PASSWORD=$(cat /tmp/yt_password.txt)
+          PLAYLIST_ARGS=$(cat /tmp/yt_playlist_args.txt)
           BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
           REPO_OWNER=$(cat /tmp/yt_repo_owner.txt)
           REPO_NAME=$(cat /tmp/yt_repo_name.txt)
@@ -378,11 +395,11 @@ jobs:
             local TMP_DIR=$3
             echo "Trying download method $METHOD..."
             if [ "$QUALITY" = "audio" ]; then
-              COMMON_FLAGS="--extract-audio --audio-format mp3 --audio-quality 0 --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
+              COMMON_FLAGS="--extract-audio --audio-format mp3 --audio-quality 0 --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part $PLAYLIST_ARGS --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
             elif [ "$QUALITY" = "best" ]; then
-              COMMON_FLAGS="--merge-output-format mp4 --format-sort res,+codec:vp9.1,+size --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
+              COMMON_FLAGS="--merge-output-format mp4 --format-sort res,+codec:vp9.1,+size --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part $PLAYLIST_ARGS --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
             else
-              COMMON_FLAGS="--merge-output-format mp4 --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
+              COMMON_FLAGS="--merge-output-format mp4 --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part $PLAYLIST_ARGS --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
             fi
             case $METHOD in
               1)
@@ -547,8 +564,8 @@ jobs:
                   # Quality not acceptable, but preserve thumbnail if it exists before cleaning up
                   THUMB_TEMP=$(ls "$TMP_DIR"/*.jpg 2>/dev/null | head -1)
                   if [ -n "$THUMB_TEMP" ] && [ -f "$THUMB_TEMP" ]; then
-                    mkdir -p "/tmp/saved_thumbnails_$"
-                    cp "$THUMB_TEMP" "/tmp/saved_thumbnails_$/thumb_${URL_INDEX}.jpg"
+                    mkdir -p "/tmp/saved_thumbnails_$$"
+                    cp "$THUMB_TEMP" "/tmp/saved_thumbnails_$$/thumb_${URL_INDEX}.jpg"
                     echo "💾 Thumbnail saved for later use"
                   fi
                 fi
@@ -562,7 +579,7 @@ jobs:
               echo "❌ All download methods failed for URL: $URL — skipping."
 
               # Check if we saved a thumbnail during quality rejection attempts
-              if [ -f "/tmp/saved_thumbnails_$/thumb_${URL_INDEX}.jpg" ]; then
+              if [ -f "/tmp/saved_thumbnails_$$/thumb_${URL_INDEX}.jpg" ]; then
                 echo "📌 Found saved thumbnail, will use it anyway"
                 # We'll handle this in the file processing section
               fi
@@ -731,7 +748,6 @@ jobs:
                   printf '%s\n' ""
                   printf '%s\n' "---"
                   printf '%s\n' ""
-                  printf '%s\n' "*This tool created by [avasam.ir](https://avasam.ir)*"
                 } > "$README_FILE"
 
                 echo "Created README.md"
@@ -801,7 +817,6 @@ jobs:
                     printf '%s\n' ""
                     printf '%s\n' "---"
                     printf '%s\n' ""
-                    printf '%s\n' "*This tool created by [avasam.ir](https://avasam.ir)*"
                   } > "$README_FILE"
 
                   echo "Created password-protected zip archive and README.md"
@@ -861,7 +876,6 @@ jobs:
                     printf '%s\n' ""
                     printf '%s\n' "---"
                     printf '%s\n' ""
-                    printf '%s\n' "*This tool created by [avasam.ir](https://avasam.ir)*"
                   } > "$README_FILE"
 
                   echo "Copied file and created README.md"
@@ -880,10 +894,6 @@ jobs:
           find "$BACKUP_DIR" -type f | head -50
           echo "===== Video info file ====="
           cat /tmp/video_info.txt
-
-      # NOTE: Thumbnail downloading is now integrated into the video download step
-      # Thumbnails are downloaded together with videos using --write-thumbnail flag
-      # This eliminates the need for a separate step and avoids re-triggering bot detection
 
       - name: Download Subtitles
         if: ${{ github.event.inputs.download_subtitles == 'true' }}
@@ -904,6 +914,7 @@ jobs:
           REPO_NAME=$(cat /tmp/yt_repo_name.txt)
           BRANCH=$(cat /tmp/yt_branch.txt)
           mapfile -t URL_LIST < /tmp/yt_urls.txt
+          PLAYLIST_ARGS=$(cat /tmp/yt_playlist_args.txt)
 
           # Subtitle download mirrors the exact same bot-bypass strategy as the video
           # downloader: same 8 methods, same proxy, same deno+EJS JS solver, same
@@ -932,7 +943,7 @@ jobs:
               esac
             }
             SFLAGS=$(sub_flags)
-            COMMON_SUB="--sub-format vtt/srt/best --convert-subs vtt --skip-download --no-playlist --no-check-certificates --output ${OUT}"
+            COMMON_SUB="--sub-format vtt/srt/best --convert-subs vtt --skip-download $PLAYLIST_ARGS --no-check-certificates --output ${OUT}"
 
             for METHOD in 1 2 3 4 5 6 7 8; do
               echo "  [subtitle] method $METHOD ..."
@@ -1162,7 +1173,7 @@ jobs:
               README_FILE="$BACKUP_DIR/${FOLDER_NAME}/README.md"
               if [ -f "$README_FILE" ]; then
                 # Write a temp file with the subtitle section
-                SUB_SECTION_FILE=$(mktemp 2>/dev/null || echo "/tmp/sub_section_$")
+                SUB_SECTION_FILE=$(mktemp 2>/dev/null || echo "/tmp/sub_section_$$")
                 if [ -n "$SUB_SECTION_FILE" ]; then
                   {
                     printf '%s\n' ""
@@ -1226,7 +1237,7 @@ jobs:
           REPO_OWNER="${{ github.repository_owner }}"
           REPO_NAME="${{ github.event.repository.name }}"
 
-          echo "AVASAM (https://avasam.ir) - Incremental Push Mode"
+          echo "Incremental Push Mode"
           echo "This method pushes files ONE AT A TIME to avoid timeout issues"
           echo ""
 
@@ -1255,7 +1266,7 @@ jobs:
               } > videos/README.md
               git add -f videos/README.md
               if ! git diff --cached --quiet; then
-                git commit --amend -m "[AVASAM] Videos update [skip ci]" 2>/dev/null || git commit -m "[AVASAM] Videos update [skip ci]"
+                git commit --amend -m "[Videos] Videos update [skip ci]" 2>/dev/null || git commit -m "[Videos] Videos update [skip ci]"
                 PUSH_RETRY=0
                 while [ $PUSH_RETRY -lt 5 ]; do
                   PUSH_RETRY=$((PUSH_RETRY + 1))
@@ -1343,7 +1354,7 @@ jobs:
               fi
 
               FILENAME=$(basename "$FILE_PATH")
-              git commit --amend -m "[AVASAM] Videos update [skip ci]" --quiet 2>/dev/null || git commit -m "[AVASAM] Videos update [skip ci]" --quiet 2>/dev/null || true
+              git commit --amend -m "[Videos] Videos update [skip ci]" --quiet 2>/dev/null || git commit -m "[Videos] Videos update [skip ci]" --quiet 2>/dev/null || true
 
               echo "    Push attempt $RETRY/$MAX_RETRIES..."
               if timeout 120 git push --force origin HEAD:"$BRANCH" 2>&1; then
@@ -1387,7 +1398,7 @@ jobs:
                 done
 
                 if ! git diff --cached --quiet 2>/dev/null; then
-                  git commit --amend -m "[AVASAM] Videos update [skip ci]" --quiet 2>/dev/null || git commit -m "[AVASAM] Videos update [skip ci]" --quiet 2>/dev/null || true
+                  git commit --amend -m "[Videos] Videos update [skip ci]" --quiet 2>/dev/null || git commit -m "[Videos] Videos update [skip ci]" --quiet 2>/dev/null || true
 
                   local PUSH_RETRY=0
                   local PUSH_SUCCESS=false
@@ -1407,7 +1418,7 @@ jobs:
                         git add -f "$BF" 2>/dev/null || true
                       done
                       if ! git diff --cached --quiet 2>/dev/null; then
-                        git commit --amend -m "[AVASAM] Videos update [skip ci]" --quiet 2>/dev/null || git commit -m "[AVASAM] Videos update [skip ci]" --quiet 2>/dev/null || true
+                        git commit --amend -m "[Videos] Videos update [skip ci]" --quiet 2>/dev/null || git commit -m "[Videos] Videos update [skip ci]" --quiet 2>/dev/null || true
                       fi
                       sleep $((3 + RANDOM % 7))
                     fi
@@ -1442,7 +1453,7 @@ jobs:
               done
 
               if ! git diff --cached --quiet 2>/dev/null; then
-                git commit --amend -m "[AVASAM] Videos update [skip ci]" --quiet 2>/dev/null || git commit -m "[AVASAM] Videos update [skip ci]" --quiet 2>/dev/null || true
+                git commit --amend -m "[Videos] Videos update [skip ci]" --quiet 2>/dev/null || git commit -m "[Videos] Videos update [skip ci]" --quiet 2>/dev/null || true
 
                 local PUSH_RETRY=0
                 while [ $PUSH_RETRY -lt 5 ]; do
@@ -1461,7 +1472,7 @@ jobs:
                       git add -f "$BF" 2>/dev/null || true
                     done
                     if ! git diff --cached --quiet 2>/dev/null; then
-                      git commit -m "[AVASAM] Add final batch [skip ci]" --quiet 2>/dev/null || true
+                      git commit -m "[Videos] Add final batch [skip ci]" --quiet 2>/dev/null || true
                     fi
                   fi
                 done
@@ -1520,7 +1531,7 @@ jobs:
             git add -f videos/README.md
 
             if ! git diff --cached --quiet; then
-              git commit --amend -m "[AVASAM] Videos update [skip ci]" 2>/dev/null || git commit -m "[AVASAM] Videos update [skip ci]"
+              git commit --amend -m "[Videos] Videos update [skip ci]" 2>/dev/null || git commit -m "[Videos] Videos update [skip ci]"
 
               PUSH_RETRY=0
               while [ $PUSH_RETRY -lt 10 ]; do
@@ -1539,7 +1550,7 @@ jobs:
                   regenerate_master_readme
                   git add -f videos/README.md
                   if ! git diff --cached --quiet; then
-                    git commit --amend -m "[AVASAM] Videos update [skip ci]" 2>/dev/null || git commit -m "[AVASAM] Videos update [skip ci]"
+                    git commit --amend -m "[Videos] Videos update [skip ci]" 2>/dev/null || git commit -m "[Videos] Videos update [skip ci]"
                   fi
                 fi
               done
@@ -1562,7 +1573,7 @@ jobs:
             git add -f videos/README.md
 
             if ! git diff --cached --quiet 2>/dev/null; then
-              git commit --amend -m "[AVASAM] Videos update [skip ci]" --quiet 2>/dev/null || git commit -m "[AVASAM] Videos update [skip ci]" --quiet 2>/dev/null || true
+              git commit --amend -m "[Videos] Videos update [skip ci]" --quiet 2>/dev/null || git commit -m "[Videos] Videos update [skip ci]" --quiet 2>/dev/null || true
 
               PUSH_RETRY=0
               while [ $PUSH_RETRY -lt 5 ]; do
@@ -1581,5 +1592,4 @@ jobs:
           echo ""
           echo "=========================================="
           echo "All files pushed successfully!"
-          echo "made in AVASAM (https://avasam.ir)"
           echo "=========================================="
