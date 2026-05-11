@@ -1,0 +1,71 @@
+name: 02- Extract Playlist URLs
+
+on:
+  workflow_dispatch:
+    inputs:
+      playlist_url:
+        description: 'YouTube Playlist URL'
+        required: true
+        type: string
+      limit:
+        description: 'Max videos (empty for all)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  extract-urls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-pip
+          pip3 install --upgrade yt-dlp
+
+      - name: Extract URLs
+        run: |
+          URL="${{ github.event.inputs.playlist_url }}"
+          LIMIT="${{ github.event.inputs.limit }}"
+          
+          if [ -n "$LIMIT" ] && [ "$LIMIT" -gt 0 ] 2>/dev/null; then
+            PL_ARGS="--playlist-end $LIMIT"
+          else
+            PL_ARGS=""
+          fi
+          
+          NOW=$(date +"%Y%m%d_%H%M%S")
+          DIR="playlists/${NOW}"
+          mkdir -p "$DIR"
+          
+          yt-dlp --flat-playlist --print "%(webpage_url)s" $PL_ARGS "$URL" > "$DIR/urls.txt" 2>/dev/null
+          
+          TOTAL=$(wc -l < "$DIR/urls.txt" 2>/dev/null || echo 0)
+          echo "Total: $TOTAL videos"
+          echo "$DIR" > /tmp/dir.txt
+
+      - name: Push
+        run: |
+          DIR=$(cat /tmp/dir.txt)
+          git add -A "$DIR"
+          if git diff --cached --quiet; then
+            echo "No changes to push"
+          else
+            git commit -m "Add playlist URLs [skip ci]"
+            for i in 1 2 3 4 5; do
+              git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin "${GITHUB_REF_NAME}" && break
+              sleep 3
+            done
+          fi
