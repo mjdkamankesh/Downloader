@@ -1,0 +1,503 @@
+name: ⬇️ Download from MediaFire
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'MediaFire URLs (separate with comma: url1, url2, url3)'
+        required: true
+        type: string
+      mode:
+        description: 'Download mode'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+          - normal
+          - zip
+      password:
+        description: 'Password for zip files (optional)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  save-file:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git for Large Files
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global http.maxRequestBuffer 100M
+          git config --global core.compression 0
+          git config --global pack.windowMemory 256m
+          git config --global pack.packSizeLimit 100m
+          git config --global pack.threads 1
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          echo "Git configured for large file handling"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip aria2 zip curl bc
+
+      - name: Install mediafire-dl
+        run: |
+          pip3 install git+https://github.com/juvenal-yescas/mediafire-dl
+          echo "mediafire-dl installed successfully"
+
+      - name: Download from MediaFire
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          URLS="${{ github.event.inputs.urls }}"
+          ZIP_PASSWORD="${{ github.event.inputs.password }}"
+
+          SPLIT_THRESHOLD_MB=45
+          SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
+
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          BRANCH="${GITHUB_REF_NAME}"
+
+          BACKUP_DIR="/tmp/download_backup_$$"
+          mkdir -p "$BACKUP_DIR"
+          echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
+
+          echo "MediaFire Downloader"
+          echo "Split threshold: $SPLIT_THRESHOLD_MB MB"
+          echo "Backup directory: $BACKUP_DIR"
+
+          mkdir -p downloads tmp_downloads
+
+          # Function to extract filename from MediaFire URL
+          get_filename_from_url() {
+            local URL="$1"
+            # Extract filename from URL (between /file/ and /file)
+            local FILENAME=$(echo "$URL" | sed -n 's/.*\/file\/[^/]*\/\([^\/]*\)\/file.*/\1/p')
+            if [ -z "$FILENAME" ]; then
+              # Alternative pattern for some MediaFire URLs
+              FILENAME=$(echo "$URL" | sed -n 's/.*\/file\/[^/]*\/\([^\/]*\)$/\1/p')
+            fi
+            if [ -z "$FILENAME" ]; then
+              # Use basename as fallback
+              FILENAME=$(basename "$URL" | sed 's/%20/ /g' | sed 's/[?#].*//')
+            fi
+            # Remove /file from end if present
+            FILENAME=$(echo "$FILENAME" | sed 's/\/file$//')
+            # Decode URL encoding
+            FILENAME=$(printf '%b' "${FILENAME//%/\\x}")
+            echo "$FILENAME"
+          }
+
+          RANDOM_WORDS=("alpha" "beta" "gamma" "delta" "epsilon" "zeta" "theta" "kappa" "lambda" "sigma" "omega" "nova" "star" "moon" "sun" "sky" "cloud" "river" "ocean" "mountain")
+
+          get_random_word() {
+            echo "${RANDOM_WORDS[$RANDOM % ${#RANDOM_WORDS[@]}]}_$RANDOM"
+          }
+
+          get_unique_folder() {
+            local BASE_PATH="$1"
+            local NAME="$2"
+            if [ ! -d "$BASE_PATH/$NAME" ] && [ ! -d "$BACKUP_DIR/$NAME" ]; then
+              echo "$NAME"
+              return
+            fi
+            local RANDOM_SUFFIX=$(get_random_word)
+            while [ -d "$BASE_PATH/${NAME}_${RANDOM_SUFFIX}" ] || [ -d "$BACKUP_DIR/${NAME}_${RANDOM_SUFFIX}" ]; do
+              RANDOM_SUFFIX=$(get_random_word)
+            done
+            echo "${NAME}_${RANDOM_SUFFIX}"
+          }
+
+          urlencode() {
+            python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
+          }
+
+          create_error_file() {
+            local FILENAME="$1"
+            local ERROR_MSG="$2"
+            local URL="$3"
+            local BASENAME_NO_EXT="${FILENAME%.*}"
+            local FOLDER_NAME=$(get_unique_folder "$BACKUP_DIR" "$BASENAME_NO_EXT")
+            mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+            {
+              echo "# ${FILENAME} - Download Failed"
+              echo ""
+              echo "---"
+              echo ""
+              echo "## Download Information"
+              echo ""
+              echo "| Property | Value |"
+              echo "|----------|-------|"
+              echo "| **File** | \`${FILENAME}\` |"
+              echo "| **URL** | ${URL} |"
+              echo "| **Date** | $(date '+%Y-%m-%d %H:%M:%S UTC') |"
+              echo "| **Status** | **FAILED** |"
+              echo ""
+              echo "---"
+              echo ""
+              echo "## Error Details"
+              echo ""
+              echo "\`\`\`"
+              echo "$ERROR_MSG"
+              echo "\`\`\`"
+              echo ""
+              echo "---"
+              echo ""
+              echo "## Possible Solutions"
+              echo ""
+              echo "- Check if the URL is correct and accessible"
+              echo "- The file may have been removed or moved"
+              echo "- Try again later if it is a temporary server issue"
+              echo ""
+              echo "---"
+              echo ""
+              echo "*Powered by MediaFire Downloader*"
+            } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
+            echo "Error file created: $BACKUP_DIR/$FOLDER_NAME/README.md"
+          }
+
+          download_with_mediafire() {
+            local URL="$1"
+            local FILENAME="$2"
+            local MAX_RETRIES=3
+            local SUCCESS=false
+            local ERROR_LOG=""
+
+            rm -f "tmp_downloads/$FILENAME"
+
+            for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+              echo "Attempt $attempt of $MAX_RETRIES for $FILENAME"
+              rm -f "tmp_downloads/$FILENAME"
+
+              # Try to download with specified output filename
+              ERROR_LOG=$(mediafire-dl "$URL" --output "tmp_downloads/$FILENAME" 2>&1)
+
+              # If --output didn't work, try without and then rename
+              if [ ! -f "tmp_downloads/$FILENAME" ] || [ ! -s "tmp_downloads/$FILENAME" ]; then
+                echo "Trying without --output flag..."
+                mediafire-dl "$URL" 2>&1
+                # Find the downloaded file (mediafire-dl might save as 'file' or original name)
+                if [ -f "tmp_downloads/file" ]; then
+                  mv "tmp_downloads/file" "tmp_downloads/$FILENAME"
+                elif [ -f "tmp_downloads/$FILENAME" ]; then
+                  # Already has correct name
+                  :
+                else
+                  # Look for any file in tmp_downloads
+                  for f in tmp_downloads/*; do
+                    if [ -f "$f" ] && [ "$f" != "tmp_downloads/$FILENAME" ]; then
+                      mv "$f" "tmp_downloads/$FILENAME"
+                      break
+                    fi
+                  done
+                fi
+              fi
+
+              if [ -f "tmp_downloads/$FILENAME" ] && [ -s "tmp_downloads/$FILENAME" ]; then
+                local FILE_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
+                if [ "$FILE_SIZE" -gt 0 ]; then
+                  SUCCESS=true
+                  echo "Download successful: $FILENAME (${FILE_SIZE} bytes)"
+                  break
+                fi
+              fi
+
+              echo "Attempt $attempt failed. Retrying..."
+              sleep 5
+            done
+
+            if [ "$SUCCESS" = true ] && [ -f "tmp_downloads/$FILENAME" ] && [ -s "tmp_downloads/$FILENAME" ]; then
+              local FINAL_SIZE=$(stat -c%s "tmp_downloads/$FILENAME" 2>/dev/null || echo "0")
+              if [ "$FINAL_SIZE" -gt 0 ]; then
+                echo "Successfully downloaded: $FILENAME ($FINAL_SIZE bytes)"
+                return 0
+              fi
+            fi
+
+            rm -f "tmp_downloads/$FILENAME"
+            create_error_file "$FILENAME" "Download failed after $MAX_RETRIES attempts. Last error: $ERROR_LOG" "$URL"
+            return 1
+          }
+
+          # Process URLs - split by comma
+          IFS=',' read -ra URL_ARRAY <<< "$URLS"
+          TOTAL_URLS=${#URL_ARRAY[@]}
+          CURRENT=0
+
+          for url in "${URL_ARRAY[@]}"; do
+            url=$(echo "$url" | xargs)
+            if [ -n "$url" ]; then
+              CURRENT=$((CURRENT + 1))
+              echo ""
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "📥 Downloading [$CURRENT/$TOTAL_URLS]"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              
+              # Extract filename from URL
+              FILENAME=$(get_filename_from_url "$url")
+              
+              # Clean filename
+              FILENAME=$(echo "$FILENAME" | sed 's/[<>:"|?*]/_/g')
+              
+              # If filename is empty or just 'file', use a better name
+              if [ -z "$FILENAME" ] || [ "$FILENAME" = "file" ] || [ "$FILENAME" = "/" ]; then
+                FILENAME="mediafire_$(date +%s)_${CURRENT}.zip"
+              fi
+              
+              # Ensure .zip extension for MediaFire links
+              if [[ ! "$FILENAME" == *"."* ]]; then
+                FILENAME="${FILENAME}.zip"
+              fi
+              
+              echo "URL: $url"
+              echo "Filename: $FILENAME"
+              
+              download_with_mediafire "$url" "$FILENAME" || echo "Failed to download: $FILENAME"
+            fi
+          done
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 DOWNLOAD SUMMARY"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          ls -la tmp_downloads/
+
+          # Rest of the code continues here (split, archive, push)
+          # [The rest of the code from previous version - split large files, create README, commit and push]
+          
+      - name: Split large files
+        run: |
+          BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
+          SPLIT_THRESHOLD_MB=45
+          SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          BRANCH="${GITHUB_REF_NAME}"
+          ZIP_PASSWORD="${{ github.event.inputs.password }}"
+
+          echo "Split threshold: $SPLIT_THRESHOLD_MB MB"
+
+          urlencode() {
+            python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
+          }
+
+          get_random_word() {
+            RANDOM_WORDS=("alpha" "beta" "gamma" "delta" "epsilon" "zeta" "theta" "kappa" "lambda" "sigma" "omega" "nova" "star" "moon" "sun" "sky" "cloud" "river" "ocean" "mountain")
+            echo "${RANDOM_WORDS[$RANDOM % ${#RANDOM_WORDS[@]}]}_$RANDOM"
+          }
+
+          get_unique_folder() {
+            local BASE_PATH="$1"
+            local NAME="$2"
+            if [ ! -d "$BASE_PATH/$NAME" ] && [ ! -d "$BACKUP_DIR/$NAME" ]; then
+              echo "$NAME"
+              return
+            fi
+            local RANDOM_SUFFIX=$(get_random_word)
+            while [ -d "$BASE_PATH/${NAME}_${RANDOM_SUFFIX}" ] || [ -d "$BACKUP_DIR/${NAME}_${RANDOM_SUFFIX}" ]; do
+              RANDOM_SUFFIX=$(get_random_word)
+            done
+            echo "${NAME}_${RANDOM_SUFFIX}"
+          }
+
+          for FILE in tmp_downloads/*; do
+            [ -f "$FILE" ] || continue
+
+            if [ ! -s "$FILE" ]; then
+              echo "WARNING: Skipping empty file: $FILE"
+              rm -f "$FILE"
+              continue
+            fi
+
+            SIZE=$(stat -c%s "$FILE")
+
+            if [ "$SIZE" -le 0 ]; then
+              echo "WARNING: File has zero or invalid size: $FILE"
+              rm -f "$FILE"
+              continue
+            fi
+
+            BASENAME=$(basename "$FILE")
+            BASENAME_NO_EXT="${BASENAME%.*}"
+            EXT="${BASENAME##*.}"
+
+            FOLDER_NAME=$(get_unique_folder "$BACKUP_DIR" "$BASENAME_NO_EXT")
+            mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+
+            FOLDER_ENCODED=$(urlencode "${FOLDER_NAME}")
+
+            if [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
+              echo "$BASENAME is $(( SIZE / 1024 / 1024 ))MB - splitting into ${SPLIT_THRESHOLD_MB}MB parts"
+
+              ARCHIVE_BASE="$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}"
+
+              if [ -n "$ZIP_PASSWORD" ]; then
+                zip -j -P "${ZIP_PASSWORD}" -s ${SPLIT_THRESHOLD_MB}m \
+                  "${ARCHIVE_BASE}.zip" \
+                  "$FILE"
+              else
+                zip -j -s ${SPLIT_THRESHOLD_MB}m \
+                  "${ARCHIVE_BASE}.zip" \
+                  "$FILE"
+              fi
+
+              PARTS_COUNT=$(ls "$BACKUP_DIR/${FOLDER_NAME}/"*.zip "$BACKUP_DIR/${FOLDER_NAME}/"*.z[0-9]* 2>/dev/null | wc -l)
+              echo "Parts created: $PARTS_COUNT files"
+
+              TOTAL_SIZE=0
+              for part_file in "$BACKUP_DIR/${FOLDER_NAME}"/*; do
+                if [ -f "$part_file" ]; then
+                  PART_SIZE=$(stat -c%s "$part_file" 2>/dev/null || echo 0)
+                  TOTAL_SIZE=$((TOTAL_SIZE + PART_SIZE))
+                fi
+              done
+              TOTAL_SIZE_MB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024" | bc)
+
+              DOWNLOAD_LINKS_MD=""
+              LINK_NUM=0
+              for part_file in $(ls "$BACKUP_DIR/${FOLDER_NAME}/"*.zip "$BACKUP_DIR/${FOLDER_NAME}/"*.z[0-9]* 2>/dev/null | sort); do
+                if [ -f "$part_file" ]; then
+                  PART_BASENAME=$(basename "$part_file")
+                  PART_ENCODED=$(urlencode "${PART_BASENAME}")
+                  RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/downloads/${FOLDER_ENCODED}/${PART_ENCODED}"
+                  LINK_NUM=$((LINK_NUM + 1))
+                  DOWNLOAD_LINKS_MD="${DOWNLOAD_LINKS_MD}| ${LINK_NUM} | \`${PART_BASENAME}\` | [Download](${RAW_LINK}) |"$'\n'
+                fi
+              done
+
+              README_FILE="$BACKUP_DIR/${FOLDER_NAME}/README.md"
+              {
+                printf '%s\n' "# ${BASENAME_NO_EXT}"
+                printf '%s\n' ""
+                printf '%s\n' "---"
+                printf '%s\n' ""
+                printf '%s\n' "## Download Information"
+                printf '%s\n' ""
+                printf '%s\n' "| Property | Value |"
+                printf '%s\n' "|----------|-------|"
+                printf '%s\n' "| **Original File** | \`${BASENAME}\` |"
+                printf '%s\n' "| **Total Size** | **${PARTS_COUNT} parts** - **${TOTAL_SIZE_MB} MB** |"
+                printf '%s\n' "| **Status** | **Complete (100%)** |"
+                if [ -n "$ZIP_PASSWORD" ]; then
+                  printf '%s\n' "| **Password Protected** | **YES** |"
+                else
+                  printf '%s\n' "| **Password Protected** | **NO** |"
+                fi
+                printf '%s\n' ""
+                printf '%s\n' "---"
+                printf '%s\n' ""
+                printf '%s\n' "## Download Links"
+                printf '%s\n' ""
+                printf '%s\n' "| # | File | Link |"
+                printf '%s\n' "|---|------|------|"
+                printf '%s' "${DOWNLOAD_LINKS_MD}"
+                printf '%s\n' ""
+                printf '%s\n' "---"
+                printf '%s\n' ""
+                printf '%s\n' "## How to Extract"
+                printf '%s\n' ""
+                printf '%s\n' "1. **Download all parts** (\`.zip\`, \`.z01\`, \`.z02\`...)"
+                printf '%s\n' "2. **Open** \`${FOLDER_NAME}.zip\` with WinRAR, 7-Zip, Ark, or any standard zip tool"
+                printf '%s\n' "3. **Extract** — all parts combine automatically"
+                if [ -n "$ZIP_PASSWORD" ]; then
+                  printf '%s\n' "4. Enter the password when prompted"
+                fi
+                printf '%s\n' ""
+                printf '%s\n' "---"
+                printf '%s\n' ""
+                printf '%s\n' "*Powered by MediaFire Downloader*"
+              } > "$README_FILE"
+
+              echo "Created split archive with README.md"
+
+            else
+              echo "$BASENAME - creating zip archive"
+
+              if [ -n "$ZIP_PASSWORD" ]; then
+                zip -j -P "${ZIP_PASSWORD}" \
+                  "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.zip" \
+                  "$FILE"
+              else
+                zip -j \
+                  "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.zip" \
+                  "$FILE"
+              fi
+
+              if [ ! -s "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.zip" ]; then
+                echo "ERROR: Failed to create archive for $BASENAME"
+                rm -f "$BACKUP_DIR/${FOLDER_NAME}/${FOLDER_NAME}.zip"
+                continue
+              fi
+
+              SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
+              FILE_ENCODED=$(urlencode "${FOLDER_NAME}.zip")
+              RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/downloads/${FOLDER_ENCODED}/${FILE_ENCODED}"
+
+              README_FILE="$BACKUP_DIR/${FOLDER_NAME}/README.md"
+              {
+                printf '%s\n' "# ${BASENAME_NO_EXT}"
+                printf '%s\n' ""
+                printf '%s\n' "---"
+                printf '%s\n' ""
+                printf '%s\n' "## Download Information"
+                printf '%s\n' ""
+                printf '%s\n' "| Property | Value |"
+                printf '%s\n' "|----------|-------|"
+                printf '%s\n' "| **Original File** | \`${BASENAME}\` |"
+                printf '%s\n' "| **Size** | ${SIZE_MB} MB |"
+                printf '%s\n' "| **Status** | **Complete (100%)** |"
+                if [ -n "$ZIP_PASSWORD" ]; then
+                  printf '%s\n' "| **Password Protected** | **YES** |"
+                else
+                  printf '%s\n' "| **Password Protected** | **NO** |"
+                fi
+                printf '%s\n' ""
+                printf '%s\n' "---"
+                printf '%s\n' ""
+                printf '%s\n' "## Download Link"
+                printf '%s\n' ""
+                printf '%s\n' "| File | Link |"
+                printf '%s\n' "|------|------|"
+                printf '%s\n' "| \`${FOLDER_NAME}.zip\` | [Download](${RAW_LINK}) |"
+                printf '%s\n' ""
+                printf '%s\n' "---"
+                printf '%s\n' ""
+                printf '%s\n' "## How to Extract"
+                printf '%s\n' ""
+                printf '%s\n' "1. **Open** \`${FOLDER_NAME}.zip\` with WinRAR, 7-Zip, Ark, or any standard zip tool"
+                printf '%s\n' "2. **Extract** the file"
+                if [ -n "$ZIP_PASSWORD" ]; then
+                  printf '%s\n' "3. Enter the password when prompted"
+                fi
+                printf '%s\n' ""
+                printf '%s\n' "---"
+                printf '%s\n' ""
+                printf '%s\n' "*Powered by MediaFire Downloader*"
+              } > "$README_FILE"
+
+              echo "Created zip archive and README.md"
+            fi
+          done
+          rm -rf tmp_downloads
+
+      - name: Update README.md with download links
+        run: |
+          BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          BRANCH="${GITHUB_REF_NAME}"
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}/tree/${{ github.ref_name }}/downloads"
+
+          mkdir -p downloads
+          if [ -d "$BACKUP_DIR" ] && [ "$(ls -A $BACKUP_DIR 2>/d
