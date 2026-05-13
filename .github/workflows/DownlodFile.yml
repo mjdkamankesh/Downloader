@@ -66,10 +66,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y aria2 zip curl bc
 
-      - name: AVASAM Downloader - https://avasam.ir
+      - name:  Downloader
         run: |
-          echo "🏷️  AVASAM - Your Download Solution"
-          echo "🌐 https://avasam.ir"
+          echo "🏷️ Your Download Solution"
+          echo "🌐"
           echo ""
 
       - name: Download files
@@ -89,7 +89,7 @@ jobs:
           mkdir -p "$BACKUP_DIR"
           echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
 
-          echo "AVASAM (https://avasam.ir) - Downloading with mode: $MODE"
+          echo " (https://.ir) - Downloading with mode: $MODE"
           echo "Split threshold: $SPLIT_THRESHOLD_MB MB (optimized for GitHub)"
           echo "Backup directory: $BACKUP_DIR"
           if [ -n "$ZIP_PASSWORD" ]; then
@@ -166,7 +166,7 @@ jobs:
               echo ""
               echo "---"
               echo ""
-              echo "*This tool created by [avasam.ir](https://avasam.ir)*"
+              echo "*This tool created by [.ir](https://.ir)*"
             } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
             echo "Error file created: $BACKUP_DIR/$FOLDER_NAME/README.md"
           }
@@ -345,7 +345,7 @@ jobs:
                     echo ""
                     echo "---"
                     echo ""
-                    echo "*This tool created by [avasam.ir](https://avasam.ir)*"
+                    echo "*This tool created by [.ir](https://.ir)*"
                   } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
                 fi
               else
@@ -464,7 +464,7 @@ jobs:
                   printf '%s\n' ""
                   printf '%s\n' "---"
                   printf '%s\n' ""
-                  printf '%s\n' "*This tool created by [avasam.ir](https://avasam.ir)*"
+                  printf '%s\n' "*This tool created by [.ir](https://.ir)*"
                 } > "$README_FILE"
 
                 echo "Created README.md for split archive"
@@ -531,7 +531,7 @@ jobs:
                   printf '%s\n' ""
                   printf '%s\n' "---"
                   printf '%s\n' ""
-                  printf '%s\n' "*This tool created by [avasam.ir](https://avasam.ir)*"
+                  printf '%s\n' "*This tool created by [.ir](https://.ir)*"
                 } > "$README_FILE"
 
                 echo "Created zip archive and README.md"
@@ -580,7 +580,7 @@ jobs:
             echo ""
             echo "---"
             echo ""
-            echo "*This tool created by [avasam.ir](https://avasam.ir)*"
+            echo "*This tool created by [.ir](https://.ir)*"
           } > "downloads/README.md"
 
           echo "downloads/README.md created with list of downloaded files"
@@ -588,9 +588,9 @@ jobs:
           SECTION_TITLE="فایل های دانلود شده در گیتهاب شما :"
 
           if [ ! -f "README.md" ]; then
-            echo "# AVASAM Downloader" > README.md
+            echo "#  Downloader" > README.md
             echo "" >> README.md
-            echo "https://avasam.ir" >> README.md
+            echo "https://.ir" >> README.md
             echo "" >> README.md
           fi
 
@@ -626,7 +626,7 @@ jobs:
           REPO_OWNER="${{ github.repository_owner }}"
           REPO_NAME="${{ github.event.repository.name }}"
 
-          echo "AVASAM (https://avasam.ir) - Incremental Push Mode"
+          echo " (https://.ir) - Incremental Push Mode"
           echo "This method pushes files in batches to avoid timeout issues"
           echo ""
 
@@ -668,7 +668,7 @@ jobs:
               echo ""
               echo "---"
               echo ""
-              echo "*This tool created by [avasam.ir](https://avasam.ir)*"
+              echo "*This tool created by [.ir](https://.ir)*"
             } >> "$DOWNLOADS_README"
 
             echo "Downloads README regenerated"
@@ -702,7 +702,7 @@ jobs:
                 done
 
                 if ! git diff --cached --quiet 2>/dev/null; then
-                  git commit -m "[AVASAM] Add batch of $BATCH_COUNT files [skip ci]" --quiet 2>/dev/null || true
+                  git commit -m "[] Add batch of $BATCH_COUNT files [skip ci]" --quiet 2>/dev/null || true
 
                   local PUSH_RETRY=0
                   local PUSH_SUCCESS=false
@@ -722,7 +722,7 @@ jobs:
                         git add -f "$BF" 2>/dev/null || true
                       done
                       if ! git diff --cached --quiet 2>/dev/null; then
-                        git commit -m "[AVASAM] Add batch of $BATCH_COUNT files [skip ci]" --quiet 2>/dev/null || true
+                        git commit -m "[] Add batch of $BATCH_COUNT files [skip ci]" --quiet 2>/dev/null || true
                       fi
                       sleep $((3 + RANDOM % 7))
                     fi
@@ -754,7 +754,7 @@ jobs:
               done
 
               if ! git diff --cached --quiet 2>/dev/null; then
-                git commit -m "[AVASAM] Add final batch [skip ci]" --quiet 2>/dev/null || true
+                git commit -m "[] Add final batch [skip ci]" --quiet 2>/dev/null || true
 
                 local PUSH_RETRY=0
                 while [ $PUSH_RETRY -lt 5 ]; do
@@ -773,7 +773,7 @@ jobs:
                       git add -f "$BF" 2>/dev/null || true
                     done
                     if ! git diff --cached --quiet 2>/dev/null; then
-                      git commit -m "[AVASAM] Add final batch [skip ci]" --quiet 2>/dev/null || true
+                      git commit -m "[] Add final batch [skip ci]" --quiet 2>/dev/null || true
                     fi
                   fi
                 done
@@ -810,7 +810,7 @@ jobs:
           if [ $TOTAL_FILES -eq 0 ]; then
             git add README.md 2>/dev/null || true
             if ! git diff --cached --quiet 2>/dev/null; then
-              git commit -m "[AVASAM] Update README [skip ci]"
+              git commit -m "[] Update README [skip ci]"
               timeout 120 git push origin HEAD:"$BRANCH" || true
             fi
             echo "No download files to push!"
@@ -835,7 +835,7 @@ jobs:
             git add README.md
 
             if ! git diff --cached --quiet; then
-              git commit -m "[AVASAM] Downloaded files [skip ci]"
+              git commit -m "[] Downloaded files [skip ci]"
 
               PUSH_RETRY=0
               while [ $PUSH_RETRY -lt 10 ]; do
@@ -853,7 +853,7 @@ jobs:
                   git add -f -A downloads/
                   git add README.md
                   if ! git diff --cached --quiet; then
-                    git commit -m "[AVASAM] Downloaded files [skip ci]"
+                    git commit -m "[] Downloaded files [skip ci]"
                   fi
                 fi
               done
@@ -877,7 +877,7 @@ jobs:
             git add README.md
 
             if ! git diff --cached --quiet 2>/dev/null; then
-              git commit -m "[AVASAM] Update download list [skip ci]" --quiet 2>/dev/null || true
+              git commit -m "Update download list [skip ci]" --quiet 2>/dev/null || true
 
               PUSH_RETRY=0
               while [ $PUSH_RETRY -lt 5 ]; do
@@ -896,5 +896,4 @@ jobs:
           echo ""
           echo "=========================================="
           echo "All files pushed successfully!"
-          echo "AVASAM (https://avasam.ir)"
           echo "=========================================="
