@@ -1,34 +1,51 @@
-name: Download with yt-dlp
+name: Direct Download with wget
 
 on:
   workflow_dispatch:
 
 jobs:
-  yt-dlp-download:
+  direct-download:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Install yt-dlp
+      - name: Get download page
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-pip
-          pip3 install yt-dlp
+          # دریافت صفحه نسخه 10.4.2
+          wget -O page.html "https://www.apkmirror.com/apk/konami/pes2017-pro-evolution-soccer/efootball-10-4-2-release/"
           
-      - name: Download eFootball
-        run: |
-          yt-dlp -f best --no-playlist \
-            "https://www.apkmirror.com/apk/konami/pes2017-pro-evolution-soccer/efootball-10-4-2-release/" \
-            -o "efootball.%(ext)s"
+          # استخراج لینک دانلود از صفحه
+          cat page.html | grep -oP 'href="\K[^"]*download[^"]*' | head -1 > download_link.txt
           
-      - name: Check and upload
+          echo "Download link:"
+          cat download_link.txt
+          
+      - name: Get final download URL
         run: |
-          find . -name "*.apk" -type f
+          DOWNLOAD_URL=$(cat download_link.txt)
+          wget -O redirect.html "https://www.apkmirror.com$DOWNLOAD_URL"
+          
+          # استخراج لینک نهایی
+          cat redirect.html | grep -oP 'href="\K[^"]*\.apk[^"]*' | head -1 > final_url.txt
+          
+          echo "Final URL:"
+          cat final_url.txt
+          
+      - name: Download APK
+        run: |
+          FINAL_URL=$(cat final_url.txt)
+          wget -O efootball.apk "$FINAL_URL"
+          
           if [ -f "efootball.apk" ]; then
-            ls -lh efootball.apk
+            SIZE=$(stat -c%s "efootball.apk")
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            echo "✅ Downloaded! Size: ${SIZE_MB} MB"
+          else
+            echo "Download failed"
+            exit 1
           fi
           
-      - name: Upload
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: efootball-10.4.2
-          path: "*.apk"
+          path: efootball.apk
