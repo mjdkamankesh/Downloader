@@ -1,54 +1,46 @@
-name: Download eFootball using APKMD CLI
+name: Download eFootball APK from APKMirror
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version (leave empty for latest)'
+        description: 'نسخه مورد نظر (خالی = آخرین نسخه)'
         required: false
         default: ''
 
 jobs:
-  download:
+  download-efootball:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     
     steps:
-      - name: Install APKMD CLI
-        run: |
-          # Download latest APKMD binary
-          wget https://github.com/tanishqmanuja/apkmirror-downloader/releases/download/v2.0.10/apkmd-linux
-          chmod +x apkmd-linux
-          sudo mv apkmd-linux /usr/local/bin/apkmd
-          
-          # Verify installation
-          apkmd --version
-
       - name: Download eFootball APK
-        run: |
-          # Create config file
-          cat > apps.json << EOF
-          {
-            "options": {
-              "arch": "arm64-v8a",
-              "dpi": "nodpi",
-              "outDir": "downloads"
-            },
-            "apps": [
-              {
-                "org": "konami",
-                "repo": "pes2017-pro-evolution-soccer",
-                "outFile": "efootball"
-              }
-            ]
-          }
-          EOF
-          
-          # Download using CLI
-          apkmd apps.json
-
-      - name: Upload APK
+        uses: Yakov5776/gh-apkmirror-dl@v1.3
+        id: download
+        with:
+          org: "konami"
+          repo: "pes2017-pro-evolution-soccer"
+          version: ${{ github.event.inputs.version }}
+          arch: "arm64-v8a"
+          dpi: "nodpi"
+          bundle: "false"
+          filename: "efootball.apk"
+      
+      - name: Upload APK as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: efootball-apk
-          path: downloads/efootball.apk
-          retention-days: 30
+          path: efootball.apk
+          retention-days: 7
+      
+      - name: Create Release (اختیاری)
+        if: ${{ github.event.inputs.version != '' }}
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: efootball-v${{ github.event.inputs.version }}
+          name: "eFootball v${{ github.event.inputs.version }}"
+          files: efootball.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
