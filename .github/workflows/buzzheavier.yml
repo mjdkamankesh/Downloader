@@ -23,136 +23,111 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: نصب Python
+      - name: نصب Python و پیش‌نیازهای سیستمی
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: نصب پیش‌نیازهای کامپایل
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-dev build-essential
+          echo "✅ پیش‌نیازهای کامپایل نصب شدند"
 
       - name: کلون Download URL Generator
         run: |
           git clone https://github.com/Ryas-Yusenda/Download-URL-Generator.git /tmp/downloader
           echo "✅ مخزن کلون شد"
-          
-          echo "📁 ساختار پروژه:"
-          find /tmp/downloader -type f -name "*.py" -o -name "*.txt" -o -name "*.md" | sort
 
-      - name: بررسی و نصب نیازمندی‌ها
+      - name: نصب نیازمندی‌های پروژه
         run: |
           cd /tmp/downloader
           
-          # نمایش محتوای requirements.txt اگر وجود دارد
+          echo "📄 فایل requirements.txt:"
           if [ -f "requirements.txt" ]; then
-            echo "📄 محتوای requirements.txt:"
             cat requirements.txt
+          else
+            echo "فایل requirements.txt وجود ندارد"
           fi
           
-          # بررسی importهای مورد نیاز در کد
           echo ""
-          echo "🔍 بررسی کتابخانه‌های مورد نیاز..."
-          IMPORTS=$(grep -rh "^from\|^import" downloader/ process.py 2>/dev/null | grep -v "from \." | sort -u)
-          echo "$IMPORTS"
+          echo "📦 نصب کتابخانه‌های مورد نیاز..."
           
-          # نصب کتابخانه‌های ضروری
+          # نصب selectolax با روش صحیح
+          pip install selectolax
+          
+          # نصب سایر نیازمندی‌ها
           pip install aiohttp beautifulsoup4 cloudscraper requests lxml
-          
-          # نصب selectolax (ممکن است نیاز به کامپایل داشته باشد)
-          pip install selectolax || {
-            echo "⚠️ selectolax از PyPI نصب نشد"
-            # تلاش با pip3 و پیش‌نیازها
-            sudo apt-get update
-            sudo apt-get install -y python3-dev build-essential
-            pip install --no-cache-dir selectolax || {
-              echo "⚠️ نصب selectolax ناموفق - تلاش با نسخه wheel"
-              pip install selectolax-py3 || echo "❌ selectolax نصب نشد"
-            }
-          }
           
           echo ""
           echo "✅ کتابخانه‌های نصب شده:"
-          pip list | grep -E "aiohttp|beautifulsoup4|cloudscraper|selectolax|lxml|requests"
+          pip list | grep -E "selectolax|aiohttp|beautifulsoup4|cloudscraper|lxml"
 
-      - name: رفع مشکل selectolax (در صورت نیاز)
+      - name: بررسی آمادگی پروژه
         run: |
           cd /tmp/downloader
           
-          # بررسی فایل‌های handler
-          echo "📁 فایل‌های handler:"
-          ls -la downloader/
+          echo "🔍 تست import کتابخانه‌ها:"
+          python3 -c "
+          try:
+              import selectolax
+              print('✅ selectolax')
+          except ImportError as e:
+              print(f'❌ selectolax: {e}')
           
-          # اگر selectolax نصب نشد، فایل fuckingfast.py را اصلاح کن
-          if ! python3 -c "import selectolax" 2>/dev/null; then
-            echo ""
-            echo "⚠️ selectolax در دسترس نیست - اصلاح handler fuckingfast..."
-            
-            if [ -f "downloader/fuckingfast.py" ]; then
-              # بکاپ از فایل اصلی
-              cp downloader/fuckingfast.py downloader/fuckingfast.py.bak
-              
-              # جایگزینی selectolax با beautifulsoup4
-              sed -i 's/from selectolax.parser import HTMLParser/from bs4 import BeautifulSoup as HTMLParser/' downloader/fuckingfast.py
-              
-              # اصلاح نحوه استفاده (اگر متفاوت باشد)
-              # این بستگی به پیاده‌سازی دارد - ممکن است نیاز به تغییرات بیشتری باشد
-              
-              echo "✅ فایل fuckingfast.py اصلاح شد"
-              echo "محتوای اصلاح شده:"
-              head -10 downloader/fuckingfast.py
-            fi
-          else
-            echo "✅ selectolax با موفقیت نصب شده است"
-          fi
+          try:
+              import aiohttp
+              print('✅ aiohttp')
+          except ImportError as e:
+              print(f'❌ aiohttp: {e}')
+          
+          try:
+              from bs4 import BeautifulSoup
+              print('✅ beautifulsoup4')
+          except ImportError as e:
+              print(f'❌ beautifulsoup4: {e}')
+          "
+          
+          echo ""
+          echo "📁 handlerهای موجود:"
+          ls -la /tmp/downloader/downloader/
 
-      - name: آماده‌سازی و اجرای استخراج
+      - name: اجرای استخراج لینک
         id: extract
         run: |
           # ایجاد فایل links.txt
           echo "${{ github.event.inputs.urls }}" | tr ' ' '\n' | sed '/^$/d' > /tmp/downloader/links.txt
           
-          echo "📝 محتوای links.txt:"
+          echo "📝 لینک‌های ورودی:"
           cat /tmp/downloader/links.txt
           echo ""
           
-          # بررسی ساختار process.py
-          echo "📄 محتوای process.py:"
-          head -30 /tmp/downloader/process.py
-          echo "..."
-          
           # اجرای process.py
-          echo ""
           echo "🔄 در حال استخراج لینک‌های مستقیم..."
           cd /tmp/downloader
-          
-          # اجرا با نمایش کامل خطا
           python3 process.py 2>&1 | tee /tmp/process_log.txt
-          EXIT_CODE=$?
           
           echo ""
-          echo "📊 کد خروج: $EXIT_CODE"
-          
-          # بررسی فایل‌های خروجی
-          echo ""
-          echo "📁 فایل‌های موجود بعد از اجرا:"
-          ls -la *.txt 2>/dev/null || echo "فایل txt یافت نشد"
+          echo "📊 نتیجه:"
           
           if [ -f "links_output.txt" ] && [ -s "links_output.txt" ]; then
+            echo "✅ استخراج موفقیت‌آمیز بود!"
             echo ""
-            echo "✅ فایل links_output.txt ایجاد شد"
-            echo "محتوای خروجی:"
+            echo "🎯 لینک‌های مستقیم:"
             echo "═══════════════════════════════════════"
             cat links_output.txt
             echo "═══════════════════════════════════════"
             cp links_output.txt /tmp/links_output.txt
-            echo "EXTRACTION_SUCCESS=true" >> $GITHUB_OUTPUT
           else
-            echo ""
-            echo "❌ فایل links_output.txt ایجاد نشد یا خالی است"
+            echo "❌ استخراج ناموفق بود"
             
-            # اگر فایل خالی است، شاید handler خاصی برای BuzzHeavier نیاز باشد
             if [ -f "links_output.txt" ]; then
-              echo "فایل خالی است"
+              echo "فایل links_output.txt خالی است"
             fi
             
-            echo "EXTRACTION_SUCCESS=false" >> $GITHUB_OUTPUT
+            echo ""
+            echo "📋 لاگ خطاها:"
+            grep -i "error\|exception\|traceback" /tmp/process_log.txt || echo "خطای خاصی یافت نشد"
           fi
 
       - name: نمایش نتایج نهایی
@@ -168,50 +143,27 @@ jobs:
             while IFS= read -r line; do
               [ -z "$line" ] && continue
               LINK_COUNT=$((LINK_COUNT + 1))
-              
-              if [[ "$line" =~ ^https?:// ]]; then
-                echo "$LINK_COUNT. ✅ $line"
-              else
-                URL=$(echo "$line" | grep -oP 'https?://[^\s"'"'"']+' | head -1)
-                if [ -n "$URL" ]; then
-                  echo "$LINK_COUNT. ✅ $URL"
-                else
-                  echo "$LINK_COUNT. ⚠️ $line"
-                fi
-              fi
+              echo "$LINK_COUNT. $line"
             done < "/tmp/links_output.txt"
             
             echo ""
-            echo "📊 تعداد لینک‌های استخراج شده: $LINK_COUNT"
+            echo "📊 تعداد لینک‌ها: $LINK_COUNT"
+            echo ""
+            echo "✅ می‌توانید از این لینک‌ها برای دانلود مستقیم استفاده کنید"
             
           else
-            echo "⚠️ هیچ لینکی استخراج نشد"
+            echo "❌ لینکی استخراج نشد"
             echo ""
-            echo "📋 لاگ کامل اجرا:"
-            echo "──────────────────────────────────────"
+            echo "📋 لاگ پردازش:"
             cat /tmp/process_log.txt
-            
-            echo ""
-            echo "🔍 عیب‌یابی:"
-            echo "1. بررسی handlerهای موجود:"
-            ls -la /tmp/downloader/downloader/
-            
-            echo ""
-            echo "2. آیا handler برای BuzzHeavier وجود دارد؟"
-            find /tmp/downloader -name "*buzz*" -o -name "*heavier*" 2>/dev/null || echo "❌ handler برای BuzzHeavier پیدا نشد"
-            
-            echo ""
-            echo "💡 ممکن است این ابزار handler برای BuzzHeavier نداشته باشد"
-            echo "لینک‌های پشتیبانی شده در readme: fuckingfast, mediafire, pixeldrain"
           fi
 
-      - name: ذخیره خروجی به عنوان آرتیفکت
+      - name: ذخیره خروجی
         uses: actions/upload-artifact@v4
         with:
-          name: extracted-links
+          name: direct-links
           path: |
             /tmp/links_output.txt
             /tmp/process_log.txt
-            /tmp/downloader/links.txt
           retention-days: 7
         if: always()
