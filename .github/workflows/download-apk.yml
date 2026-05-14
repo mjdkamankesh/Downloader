@@ -1,4 +1,4 @@
-name: Download eFootball with WARP + Linux APKMD
+name: Download eFootball
 
 on:
   workflow_dispatch:
@@ -8,49 +8,20 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Start WARP Container
-        run: |
-          docker run -d --name warp --cap-add NET_ADMIN -p 1080:1080 caomingjun/warp
-          sleep 15
-          
       - name: Download APKMD
         run: |
-          curl -L -o apkmd https://github.com/tanishqmanuja/apkmirror-downloader/releases/download/v2.0.10/apkmd
+          wget https://github.com/tanishqmanuja/apkmirror-downloader/releases/download/v2.0.10/apkmd
           chmod +x apkmd
           
       - name: Create config
         run: |
-          cat > apps.json << 'EOF'
-          {
-            "options": {
-              "arch": "arm64-v8a",
-              "dpi": "nodpi",
-              "outDir": "downloads"
-            },
-            "apps": [
-              {
-                "org": "konami",
-                "repo": "pes2017-pro-evolution-soccer",
-                "outFile": "efootball",
-                "version": "10.4.2"
-              }
-            ]
-          }
-          EOF
+          echo '{"options":{"arch":"arm64-v8a","outDir":"downloads"},"apps":[{"org":"konami","repo":"pes2017-pro-evolution-soccer","outFile":"efootball","version":"10.4.2"}]}' > apps.json
           
-      - name: Download with WARP proxy
-        run: |
-          export HTTP_PROXY=socks5://127.0.0.1:1080
-          export HTTPS_PROXY=socks5://127.0.0.1:1080
-          
-          ./apkmd apps.json
-          
+      - name: Download
+        run: ./apkmd apps.json
+        
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: efootball-10.4.2
+          name: efootball
           path: downloads/efootball.apk
-          
-      - name: Stop WARP
-        if: always()
-        run: docker stop warp || true
