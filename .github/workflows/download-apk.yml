@@ -14,6 +14,9 @@ jobs:
     timeout-minutes: 30
     
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
       - name: Start Cloudflare WARP Container
         run: |
           echo "Starting Cloudflare WARP container..."
@@ -47,25 +50,39 @@ jobs:
             fi
           done
 
-      - name: Install Dependencies
+      - name: Setup Node.js and Install Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y nodejs npm wget curl unzip
+          # Setup Node.js
+          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+          sudo apt-get install -y nodejs
           
-          # Install the APK downloader
-          npm install -g apkmirror-downloader
+          # Create a new npm project
+          mkdir -p downloader
+          cd downloader
+          
+          # Initialize package.json and install the package locally
+          npm init -y
+          npm install apkmirror-downloader
+          
+          # Also install globally as backup
+          sudo npm install -g apkmirror-downloader
+          
+          echo "✅ Dependencies installed successfully"
 
       - name: Download eFootball APK via WARP Proxy
         env:
           VERSION: ${{ github.event.inputs.version }}
         run: |
-          # Create download script with proxy support
+          cd downloader
+          
+          # Create download script
           cat > download.js << 'EOF'
           const { APKMirrorDownloader } = require('apkmirror-downloader');
           
           // Configure proxy (WARP SOCKS5)
           process.env.HTTPS_PROXY = 'socks5://127.0.0.1:1080';
           process.env.HTTP_PROXY = 'socks5://127.0.0.1:1080';
+          process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
           
           async function download() {
             const apkmd = new APKMirrorDownloader({ 
@@ -77,9 +94,10 @@ jobs:
             
             console.log(`Starting download of eFootball${version ? ' v' + version : ' (latest version)'}...`);
             console.log('Using WARP proxy for Cloudflare bypass...');
+            console.log('Proxy configured: socks5://127.0.0.1:1080');
             
             try {
-              await apkmd.download(
+              const result = await apkmd.download(
                 { org: "konami", repo: "pes2017-pro-evolution-soccer" },
                 { 
                   type: "apk",
@@ -90,8 +108,10 @@ jobs:
                 }
               );
               console.log('✅ Download completed successfully!');
+              console.log('Result:', result);
             } catch (error) {
               console.error('❌ Download failed:', error.message);
+              console.error('Stack:', error.stack);
               process.exit(1);
             }
           }
@@ -104,15 +124,21 @@ jobs:
 
       - name: Verify Download
         run: |
-          if [ -f "downloads/efootball.apk" ]; then
-            SIZE=$(stat -c%s "downloads/efootball.apk")
+          if [ -f "downloader/downloads/efootball.apk" ]; then
+            SIZE=$(stat -c%s "downloader/downloads/efootball.apk")
             SIZE_MB=$((SIZE / 1024 / 1024))
             echo "✅ APK downloaded successfully!"
-            echo "📁 File: downloads/efootball.apk"
+            echo "📁 File: downloader/downloads/efootball.apk"
             echo "📊 Size: ${SIZE_MB} MB"
-            ls -lh downloads/
+            ls -lh downloader/downloads/
+            
+            # Move to root for easier artifact upload
+            mkdir -p final-apk
+            cp downloader/downloads/efootball.apk final-apk/
           else
             echo "❌ APK file not found!"
+            echo "Checking directories..."
+            find . -name "*.apk" 2>/dev/null || echo "No APK files found"
             exit 1
           fi
 
@@ -120,7 +146,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: efootball-apk
-          path: downloads/efootball.apk
+          path: final-apk/efootball.apk
           retention-days: 30
 
       - name: Stop WARP Container
