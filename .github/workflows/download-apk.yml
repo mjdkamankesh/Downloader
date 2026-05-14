@@ -1,6 +1,5 @@
-name: Download eFootball APK from APKMirror
+name: Download eFootball APK from APKMirror (with WARP Bypass)
 
-# فقط اجرای دستی
 on:
   workflow_dispatch:
     inputs:
@@ -8,36 +7,124 @@ on:
         description: 'نسخه مورد نظر (خالی بگذارید برای آخرین نسخه)'
         required: false
         default: ''
-      arch:
-        description: 'معماری (arm64-v8a, armeabi-v7a, universal)'
-        required: false
-        default: 'arm64-v8a'
-      dpi:
-        description: 'DPI صفحه نمایش (nodpi, 120dpi, 240dpi, 320dpi, 480dpi, 640dpi)'
-        required: false
-        default: 'nodpi'
 
 jobs:
   download-efootball:
     runs-on: ubuntu-latest
-    name: Download eFootball APK
+    timeout-minutes: 30
     
     steps:
-      - name: Download eFootball APK from APKMirror
-        id: download
-        uses: Yakov5776/gh-apkmirror-dl@v1.3
-        with:
-          org: "konami"
-          repo: "pes2017-pro-evolution-soccer"
-          version: ${{ github.event.inputs.version }}
-          arch: ${{ github.event.inputs.arch }}
-          dpi: ${{ github.event.inputs.dpi }}
-          bundle: false
-          filename: "efootball.apk"
-      
+      - name: Start Cloudflare WARP Container
+        run: |
+          echo "Starting Cloudflare WARP container..."
+          
+          docker network create warp-net || true
+          
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+          
+          echo "Waiting for WARP to initialize (15 seconds)..."
+          sleep 15
+          
+          echo "Checking WARP status..."
+          for i in {1..5}; do
+            RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "✅ WARP is active!"
+              echo "$RESULT"
+              break
+            else
+              echo "Attempt $i/5 - WARP not ready yet, waiting..."
+              sleep 5
+            fi
+          done
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nodejs npm wget curl unzip
+          
+          # Install the APK downloader
+          npm install -g apkmirror-downloader
+
+      - name: Download eFootball APK via WARP Proxy
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          # Create download script with proxy support
+          cat > download.js << 'EOF'
+          const { APKMirrorDownloader } = require('apkmirror-downloader');
+          
+          // Configure proxy (WARP SOCKS5)
+          process.env.HTTPS_PROXY = 'socks5://127.0.0.1:1080';
+          process.env.HTTP_PROXY = 'socks5://127.0.0.1:1080';
+          
+          async function download() {
+            const apkmd = new APKMirrorDownloader({ 
+              outDir: './downloads',
+              overwrite: true
+            });
+            
+            const version = process.env.VERSION || '';
+            
+            console.log(`Starting download of eFootball${version ? ' v' + version : ' (latest version)'}...`);
+            console.log('Using WARP proxy for Cloudflare bypass...');
+            
+            try {
+              await apkmd.download(
+                { org: "konami", repo: "pes2017-pro-evolution-soccer" },
+                { 
+                  type: "apk",
+                  arch: "arm64-v8a",
+                  dpi: "nodpi",
+                  version: version || undefined,
+                  outFile: "efootball.apk"
+                }
+              );
+              console.log('✅ Download completed successfully!');
+            } catch (error) {
+              console.error('❌ Download failed:', error.message);
+              process.exit(1);
+            }
+          }
+          
+          download();
+          EOF
+          
+          # Run the download with proxy
+          node download.js
+
+      - name: Verify Download
+        run: |
+          if [ -f "downloads/efootball.apk" ]; then
+            SIZE=$(stat -c%s "downloads/efootball.apk")
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            echo "✅ APK downloaded successfully!"
+            echo "📁 File: downloads/efootball.apk"
+            echo "📊 Size: ${SIZE_MB} MB"
+            ls -lh downloads/
+          else
+            echo "❌ APK file not found!"
+            exit 1
+          fi
+
       - name: Upload APK as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: efootball-apk
-          path: ${{ steps.download.outputs.filename }}
+          path: downloads/efootball.apk
           retention-days: 30
+
+      - name: Stop WARP Container
+        if: always()
+        run: |
+          docker stop warp || true
+          docker rm warp || true
