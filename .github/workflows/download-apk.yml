@@ -1,4 +1,4 @@
-name: Download eFootball with WARP
+name: Download eFootball with WARP + Linux APKMD
 
 on:
   workflow_dispatch:
@@ -13,24 +13,39 @@ jobs:
           docker run -d --name warp --cap-add NET_ADMIN -p 1080:1080 caomingjun/warp
           sleep 15
           
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Download APKMD
+        run: |
+          curl -L -o apkmd https://github.com/tanishqmanuja/apkmirror-downloader/releases/download/v2.0.10/apkmd
+          chmod +x apkmd
+          
+      - name: Create config
+        run: |
+          cat > apps.json << 'EOF'
+          {
+            "options": {
+              "arch": "arm64-v8a",
+              "dpi": "nodpi",
+              "outDir": "downloads"
+            },
+            "apps": [
+              {
+                "org": "konami",
+                "repo": "pes2017-pro-evolution-soccer",
+                "outFile": "efootball",
+                "version": "10.4.2"
+              }
+            ]
+          }
+          EOF
           
       - name: Download with WARP proxy
         run: |
           export HTTP_PROXY=socks5://127.0.0.1:1080
           export HTTPS_PROXY=socks5://127.0.0.1:1080
           
-          npx apkmirror-downloader@2.0.10 download konami pes2017-pro-evolution-soccer \
-            --arch arm64-v8a \
-            --dpi nodpi \
-            --version 10.4.2 \
-            --outDir downloads \
-            --outFile efootball.apk
-            
-      - name: Upload APK
+          ./apkmd apps.json
+          
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: efootball-10.4.2
