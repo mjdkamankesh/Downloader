@@ -1,193 +1,219 @@
-      - name: استخراج و دانلود
+name: ⬇️ دانلود از BuzzHeavier
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: '🔗 لینک‌های BuzzHeavier (با فاصله جدا کنید)'
+        required: true
+        type: string
+      server:
+        description: '🖥️ سرور دانلود'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - 'all'
+      mode:
+        description: '📦 حالت ذخیره‌سازی'
+        required: false
+        default: 'single'
+        type: choice
+        options:
+          - single
+          - zip
+      password:
+        description: '🔒 رمز عبور zip (اختیاری)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: نصب پیش‌نیازها
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 zip curl python3 python3-pip
+          pip3 install requests beautifulsoup4
+
+      - name: ایجاد اسکریپت پایتون
+        run: |
+          cat > bh_extractor.py << 'ENDOFSCRIPT'
+          import sys, requests, re
+          from bs4 import BeautifulSoup
+          from urllib.parse import urljoin
+          
+          url = sys.argv[1]
+          
+          try:
+              resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
+              soup = BeautifulSoup(resp.text, 'html.parser')
+              
+              # نام فایل
+              title = soup.find('title')
+              fname = title.text.strip() if title else 'unknown'
+              print(f"FILENAME:{fname}")
+              
+              # لینک‌های دانلود
+              count = 0
+              for a in soup.find_all('a'):
+                  link = a.get('hx-get') or a.get('href') or ''
+                  if '/download?' in link:
+                      count += 1
+                      full = urljoin(url, link)
+                      # تعیین سرور
+                      txt = a.text.strip()
+                      if 'Server 2' in txt or 'alt=true' in link:
+                          srv = '2'
+                      else:
+                          srv = '1'
+                      print(f"DOWNLOAD_URL:{full}")
+                      print(f"SERVER:{srv}")
+              
+              if count == 0:
+                  print("ERROR:no_links", file=sys.stderr)
+                  sys.exit(1)
+          
+          except Exception as e:
+              print(f"ERROR:{e}", file=sys.stderr)
+              sys.exit(1)
+          ENDOFSCRIPT
+          
+          chmod +x bh_extractor.py
+          echo "✅ اسکریپت ایجاد شد"
+          
+          # تست سریع
+          python3 bh_extractor.py --help 2>&1 || true
+
+      - name: تست اسکریپت
+        run: |
+          echo "🧪 تست اسکریپت با لینک نمونه..."
+          python3 bh_extractor.py "https://buzzheavier.com/4h7frwdqg4g9" 2>&1 || true
+          echo ""
+          echo "✅ اگر خروجی بالا را دیدید، اسکریپت کار می‌کند"
+
+      - name: دانلود فایل‌ها
         run: |
           URLS="${{ github.event.inputs.urls }}"
-          SERVER_CHOICE="${{ github.event.inputs.server }}"
+          SERVER="${{ github.event.inputs.server }}"
           MODE="${{ github.event.inputs.mode }}"
-          ZIP_PASSWORD="${{ github.event.inputs.password }}"
+          PASS="${{ github.event.inputs.password }}"
           
-          SPLIT_SIZE=45
-          BACKUP_DIR="/tmp/dl_$$"
-          mkdir -p "$BACKUP_DIR" downloads tmp_downloads
+          mkdir -p downloads tmp_downloads
           
           for URL in $URLS; do
+            echo ""
+            echo "════════════════════════════════════"
             echo "🔍 پردازش: $URL"
-            echo ""
             
-            # استخراج لینک دانلود با نمایش لاگ
-            echo "📋 اجرای اسکریپت استخراج..."
-            OUTPUT=$(python3 /tmp/bh_extractor.py "$URL" 2>&1)
-            EXIT_CODE=$?
+            # اجرای اسکریپت
+            OUTPUT=$(python3 bh_extractor.py "$URL" 2>/tmp/err.log)
+            RC=$?
             
-            echo "کد خروج اسکریپت: $EXIT_CODE"
-            echo "خروجی اسکریپت:"
-            echo "$OUTPUT"
-            echo ""
-            
-            if [ $EXIT_CODE -ne 0 ]; then
-              echo "❌ اسکریپت با خطا مواجه شد"
-              cat /tmp/bh_error.log 2>/dev/null
+            if [ $RC -ne 0 ]; then
+              echo "❌ خطا در استخراج لینک:"
+              cat /tmp/err.log
               continue
             fi
+            
+            # نمایش خروجی
+            echo "$OUTPUT"
             
             # استخراج نام فایل
-            FILENAME=$(echo "$OUTPUT" | grep "^FILENAME:" | cut -d':' -f2-)
-            if [ -z "$FILENAME" ]; then
-              echo "⚠️ نام فایل پیدا نشد - استفاده از نام پیش‌فرض"
-              FILENAME="download_$(date +%s)"
-            fi
-            echo "📁 نام فایل: $FILENAME"
+            FNAME=$(echo "$OUTPUT" | grep "^FILENAME:" | head -1 | cut -d: -f2-)
+            [ -z "$FNAME" ] && FNAME="file_$(date +%s)"
+            echo "📁 فایل: $FNAME"
             
-            # استخراج لینک‌های دانلود
-            echo ""
-            echo "🔗 لینک‌های دانلود موجود:"
-            echo "$OUTPUT" | grep "^DOWNLOAD_URL:"
-            echo ""
-            
-            # انتخاب سرور
-            if [ "$SERVER_CHOICE" = "all" ]; then
-              DOWNLOAD_URLS=$(echo "$OUTPUT" | grep "^DOWNLOAD_URL:" | cut -d':' -f2-)
-            elif [ "$SERVER_CHOICE" = "2" ]; then
-              # پیدا کردن سرور 2
-              SERVER2_LINE=$(echo "$OUTPUT" | grep -n "SERVER:2" | head -1 | cut -d: -f1)
-              if [ -n "$SERVER2_LINE" ]; then
-                # لینک دانلود قبل از خط SERVER:2
-                PREV_LINE=$((SERVER2_LINE - 1))
-                DOWNLOAD_URLS=$(echo "$OUTPUT" | sed -n "${PREV_LINE}p" | grep "^DOWNLOAD_URL:" | cut -d':' -f2-)
-              fi
-              
-              if [ -z "$DOWNLOAD_URLS" ]; then
-                echo "⚠️ سرور 2 در دسترس نیست - استفاده از سرور 1"
-                DOWNLOAD_URLS=$(echo "$OUTPUT" | grep "^DOWNLOAD_URL:" | head -1 | cut -d':' -f2-)
-              fi
+            # استخراج لینک‌ها
+            if [ "$SERVER" = "all" ]; then
+              URLS_DL=$(echo "$OUTPUT" | grep "^DOWNLOAD_URL:" | cut -d: -f2-)
+            elif [ "$SERVER" = "2" ]; then
+              URLS_DL=$(echo "$OUTPUT" | grep -B1 "SERVER:2" | grep "^DOWNLOAD_URL:" | cut -d: -f2-)
+              [ -z "$URLS_DL" ] && URLS_DL=$(echo "$OUTPUT" | grep "^DOWNLOAD_URL:" | head -1 | cut -d: -f2-)
             else
-              # پیش‌فرض سرور 1
-              DOWNLOAD_URLS=$(echo "$OUTPUT" | grep "^DOWNLOAD_URL:" | head -1 | cut -d':' -f2-)
+              URLS_DL=$(echo "$OUTPUT" | grep "^DOWNLOAD_URL:" | head -1 | cut -d: -f2-)
             fi
             
-            if [ -z "$DOWNLOAD_URLS" ]; then
-              echo "❌ هیچ لینک دانلودی پیدا نشد"
-              continue
-            fi
-            
-            echo "🎯 لینک(های) انتخاب شده:"
-            echo "$DOWNLOAD_URLS"
-            echo ""
+            [ -z "$URLS_DL" ] && { echo "❌ لینکی پیدا نشد"; continue; }
             
             # دانلود
-            DL_COUNT=0
-            echo "$DOWNLOAD_URLS" | while IFS= read -r DL_URL; do
-              [ -z "$DL_URL" ] && continue
-              DL_COUNT=$((DL_COUNT + 1))
+            N=0
+            echo "$URLS_DL" | while read DL; do
+              [ -z "$DL" ] && continue
+              N=$((N + 1))
               
-              # URL encode کردن کاراکترهای خاص
-              DL_URL=$(echo "$DL_URL" | sed 's/&amp;/\&/g')
+              # رفع &amp;
+              DL=$(echo "$DL" | sed 's/&amp;/\&/g')
               
-              if [ "$SERVER_CHOICE" = "all" ] && [ $DL_COUNT -gt 1 ]; then
-                SAVE_NAME="server${DL_COUNT}_${FILENAME}"
+              if [ "$SERVER" = "all" ] && [ $N -gt 1 ]; then
+                SNAME="s${N}_${FNAME}"
               else
-                SAVE_NAME="$FILENAME"
+                SNAME="$FNAME"
               fi
               
-              echo "⏬ [$DL_COUNT] دانلود: $SAVE_NAME"
-              echo "🔗 URL: $DL_URL"
+              echo "⏬ [$N] $SNAME"
               
-              # تلاش با aria2
-              if aria2c \
-                --split=8 \
-                --max-connection-per-server=8 \
-                --min-split-size=20M \
-                --max-tries=5 \
-                --retry-wait=5 \
-                --timeout=120 \
-                --connect-timeout=30 \
-                --allow-overwrite=true \
-                --auto-file-renaming=false \
-                --dir="tmp_downloads" \
-                --out="$SAVE_NAME" \
-                "$DL_URL" 2>&1; then
-                echo "✅ aria2 موفق"
-              else
-                echo "⚠️ aria2 ناموفق - استفاده از curl"
-                if curl -L -# \
-                  --retry 3 \
-                  --retry-delay 5 \
-                  --connect-timeout 30 \
-                  --max-time 7200 \
-                  -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-                  -H "Referer: $URL" \
-                  -o "tmp_downloads/$SAVE_NAME" \
-                  "$DL_URL" 2>&1; then
-                  echo "✅ curl موفق"
-                else
-                  echo "❌ دانلود ناموفق"
-                fi
-              fi
-              echo ""
+              aria2c -x8 -s8 -k20M --max-tries=5 -d tmp_downloads -o "$SNAME" "$DL" 2>&1 || {
+                echo "⚠️ fallback to curl..."
+                curl -L -o "tmp_downloads/$SNAME" -A "Mozilla/5.0" -H "Referer: $URL" "$DL" --retry 3 -#
+              }
             done
           done
           
-          # ادامه پردازش...
+          # نمایش فایل‌های دانلود شده
+          echo ""
           echo "📊 فایل‌های دانلود شده:"
-          ls -lh tmp_downloads/ 2>/dev/null || echo "هیچ فایلی دانلود نشد"
+          ls -lh tmp_downloads/ 2>/dev/null || echo "خالی"
           
-          if [ -z "$(ls -A tmp_downloads 2>/dev/null)" ]; then
-            echo "❌ فایلی برای بسته‌بندی وجود ندارد"
-            exit 1
-          fi
+          [ -z "$(ls -A tmp_downloads 2>/dev/null)" ] && { echo "❌ فایلی نیست"; exit 1; }
           
-          echo "📦 بسته‌بندی فایل‌ها..."
+          # بسته‌بندی
+          echo "📦 بسته‌بندی..."
           
           if [ "$MODE" = "zip" ]; then
-            ARCHIVE_NAME="buzzheavier_$(date +%Y%m%d_%H%M%S)"
-            mkdir -p "$BACKUP_DIR/$ARCHIVE_NAME"
-            
-            if [ -n "$ZIP_PASSWORD" ]; then
-              zip -j -P "$ZIP_PASSWORD" -s ${SPLIT_SIZE}m \
-                "$BACKUP_DIR/$ARCHIVE_NAME/${ARCHIVE_NAME}.zip" \
-                tmp_downloads/*
-            else
-              zip -j -s ${SPLIT_SIZE}m \
-                "$BACKUP_DIR/$ARCHIVE_NAME/${ARCHIVE_NAME}.zip" \
-                tmp_downloads/*
-            fi
-            
-            echo "# $ARCHIVE_NAME" > "$BACKUP_DIR/$ARCHIVE_NAME/README.md"
+            ZIPNAME="buzzheavier_$(date +%Y%m%d_%H%M%S)"
+            mkdir -p "downloads/$ZIPNAME"
+            [ -n "$PASS" ] && ZIPOPT="-P $PASS" || ZIPOPT=""
+            zip -j $ZIPOPT -s 45m "downloads/$ZIPNAME/$ZIPNAME.zip" tmp_downloads/*
+            echo "# $ZIPNAME" > "downloads/$ZIPNAME/README.md"
+          else
             for f in tmp_downloads/*; do
               [ -f "$f" ] || continue
-              SIZE=$(du -h "$f" | cut -f1)
-              echo "- $(basename "$f") ($SIZE)" >> "$BACKUP_DIR/$ARCHIVE_NAME/README.md"
-            done
-          else
-            for FILE in tmp_downloads/*; do
-              [ -f "$FILE" ] || continue
-              
-              BASENAME=$(basename "$FILE")
-              SIZE=$(stat -c%s "$FILE")
-              SIZE_MB=$((SIZE / 1024 / 1024))
-              
-              FOLDER="${BASENAME%.*}_$(date +%s)"
-              mkdir -p "$BACKUP_DIR/$FOLDER"
-              
-              if [ "$SIZE" -gt $((SPLIT_SIZE * 1024 * 1024)) ]; then
-                if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -j -P "$ZIP_PASSWORD" -s ${SPLIT_SIZE}m \
-                    "$BACKUP_DIR/$FOLDER/${FOLDER}.zip" "$FILE"
-                else
-                  zip -j -s ${SPLIT_SIZE}m \
-                    "$BACKUP_DIR/$FOLDER/${FOLDER}.zip" "$FILE"
-                fi
-              else
-                if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -j -P "$ZIP_PASSWORD" \
-                    "$BACKUP_DIR/$FOLDER/${FOLDER}.zip" "$FILE"
-                else
-                  zip -j "$BACKUP_DIR/$FOLDER/${FOLDER}.zip" "$FILE"
-                fi
-              fi
-              
-              echo "# $BASENAME (${SIZE_MB}MB)" > "$BACKUP_DIR/$FOLDER/README.md"
+              B=$(basename "$f")
+              S=$(stat -c%s "$f")
+              F="downloads/${B%.*}_$(date +%s)"
+              mkdir -p "$F"
+              [ -n "$PASS" ] && ZIPOPT="-P $PASS" || ZIPOPT=""
+              [ $S -gt 47185920 ] && zip -j $ZIPOPT -s 45m "$F/$B.zip" "$f" || zip -j $ZIPOPT "$F/$B.zip" "$f"
+              echo "# $B ($((S/1024/1024))MB)" > "$F/README.md"
             done
           fi
           
-          cp -r "$BACKUP_DIR"/* downloads/ 2>/dev/null
-          echo "✅ عملیات کامل شد"
+          echo "✅ تمام"
+
+      - name: آپلود
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -f downloads/
+          git diff --cached --quiet && { echo "بدون تغییر"; exit 0; }
+          git commit -m "📥 BuzzHeavier [skip ci]"
+          for i in 1 2 3 4 5; do
+            git push origin "${GITHUB_REF_NAME}" && { echo "✅ آپلود شد"; exit 0; }
+            sleep 10
+          done
+          echo "❌ آپلود ناموفق"
