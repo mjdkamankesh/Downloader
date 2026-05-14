@@ -1,31 +1,54 @@
-name: Download eFootball APK (Simple)
+name: Download eFootball using APKMD CLI
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'نسخه (خالی = آخرین نسخه)'
+        description: 'Version (leave empty for latest)'
         required: false
+        default: ''
 
 jobs:
   download:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Download APK using gh-apkmirror-dl
-        uses: Yakov5776/gh-apkmirror-dl@v1.3
-        with:
-          org: "konami"
-          repo: "pes2017-pro-evolution-soccer"
-          version: ${{ github.event.inputs.version }}
-          arch: "arm64-v8a"
-          dpi: "nodpi"
-          bundle: "false"
-          filename: "efootball.apk"
-      
-      - name: Upload Artifact
+      - name: Install APKMD CLI
+        run: |
+          # Download latest APKMD binary
+          wget https://github.com/tanishqmanuja/apkmirror-downloader/releases/download/v2.0.10/apkmd-linux
+          chmod +x apkmd-linux
+          sudo mv apkmd-linux /usr/local/bin/apkmd
+          
+          # Verify installation
+          apkmd --version
+
+      - name: Download eFootball APK
+        run: |
+          # Create config file
+          cat > apps.json << EOF
+          {
+            "options": {
+              "arch": "arm64-v8a",
+              "dpi": "nodpi",
+              "outDir": "downloads"
+            },
+            "apps": [
+              {
+                "org": "konami",
+                "repo": "pes2017-pro-evolution-soccer",
+                "outFile": "efootball"
+              }
+            ]
+          }
+          EOF
+          
+          # Download using CLI
+          apkmd apps.json
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: efootball-apk
-          path: efootball.apk
+          path: downloads/efootball.apk
           retention-days: 30
