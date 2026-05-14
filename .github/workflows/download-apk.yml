@@ -1,51 +1,41 @@
-name: Direct Download with wget
+name: Download eFootball with WARP
 
 on:
   workflow_dispatch:
 
 jobs:
-  direct-download:
+  download:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Get download page
+      - name: Start WARP Container
         run: |
-          # دریافت صفحه نسخه 10.4.2
-          wget -O page.html "https://www.apkmirror.com/apk/konami/pes2017-pro-evolution-soccer/efootball-10-4-2-release/"
+          docker run -d --name warp --cap-add NET_ADMIN -p 1080:1080 caomingjun/warp
+          sleep 15
           
-          # استخراج لینک دانلود از صفحه
-          cat page.html | grep -oP 'href="\K[^"]*download[^"]*' | head -1 > download_link.txt
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
           
-          echo "Download link:"
-          cat download_link.txt
-          
-      - name: Get final download URL
+      - name: Download with WARP proxy
         run: |
-          DOWNLOAD_URL=$(cat download_link.txt)
-          wget -O redirect.html "https://www.apkmirror.com$DOWNLOAD_URL"
+          export HTTP_PROXY=socks5://127.0.0.1:1080
+          export HTTPS_PROXY=socks5://127.0.0.1:1080
           
-          # استخراج لینک نهایی
-          cat redirect.html | grep -oP 'href="\K[^"]*\.apk[^"]*' | head -1 > final_url.txt
-          
-          echo "Final URL:"
-          cat final_url.txt
-          
-      - name: Download APK
-        run: |
-          FINAL_URL=$(cat final_url.txt)
-          wget -O efootball.apk "$FINAL_URL"
-          
-          if [ -f "efootball.apk" ]; then
-            SIZE=$(stat -c%s "efootball.apk")
-            SIZE_MB=$((SIZE / 1024 / 1024))
-            echo "✅ Downloaded! Size: ${SIZE_MB} MB"
-          else
-            echo "Download failed"
-            exit 1
-          fi
-          
+          npx apkmirror-downloader@2.0.10 download konami pes2017-pro-evolution-soccer \
+            --arch arm64-v8a \
+            --dpi nodpi \
+            --version 10.4.2 \
+            --outDir downloads \
+            --outFile efootball.apk
+            
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: efootball-10.4.2
-          path: efootball.apk
+          path: downloads/efootball.apk
+          
+      - name: Stop WARP
+        if: always()
+        run: docker stop warp || true
