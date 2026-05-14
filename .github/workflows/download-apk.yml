@@ -1,36 +1,105 @@
-name: Download eFootball with WARP
+name: Download eFootball with WARP Bypass
 
 on:
   workflow_dispatch:
 
 jobs:
-  download:
+  download-efootball:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 30
+
     steps:
-      - name: Start WARP
+      # مرحله 1: راه‌اندازی کانتینر WARP (دقیقاً مثل کد خودتان)
+      - name: Start WARP Container
         run: |
-          docker run -d --name warp --cap-add NET_ADMIN -p 1080:1080 caomingjun/warp
+          echo "Starting Cloudflare WARP container..."
+
+          docker network create warp-net || true
+
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+
+          echo "Waiting for WARP to initialize (15 seconds)..."
           sleep 15
-          
-      - name: Setup
+
+          echo "Checking WARP status..."
+          for i in {1..5}; do
+            RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "✅ WARP is active!"
+              echo "$RESULT"
+              break
+            else
+              echo "Attempt $i/5 - WARP not ready yet, waiting..."
+              sleep 5
+            fi
+          done
+
+      # مرحله 2: نصب yt-dlp (که با WARP کار می‌کند)
+      - name: Install yt-dlp
         run: |
-          wget https://github.com/tanishqmanuja/apkmirror-downloader/releases/download/v2.0.10/apkmd
-          chmod +x apkmd
-          echo '{"options":{"arch":"arm64-v8a","outDir":"downloads"},"apps":[{"org":"konami","repo":"pes2017-pro-evolution-soccer","outFile":"efootball","version":"10.4.2"}]}' > apps.json
-          
-      - name: Download via WARP
+          sudo apt-get update
+          sudo apt-get install -y python3-pip ffmpeg
+          pip3 install yt-dlp
+
+      # مرحله 3: دانلود فایل APK از طریق WARP با yt-dlp
+      - name: Download eFootball APK via WARP
         run: |
-          export HTTP_PROXY=socks5://127.0.0.1:1080
-          export HTTPS_PROXY=socks5://127.0.0.1:1080
-          ./apkmd apps.json
+          export https_proxy=socks5://127.0.0.1:1080
+          export http_proxy=socks5://127.0.0.1:1080
+
+          echo "Starting download of eFootball 10.4.2 via WARP..."
           
-      - name: Upload
+          # این لینک همان صفحه آخری است که خودتان پیدا کرده‌اید
+          yt-dlp --proxy socks5://127.0.0.1:1080 \
+            "https://www.apkmirror.com/apk/konami/pes2017-pro-evolution-soccer/efootball-10-4-2-release/" \
+            --output "efootball.%(ext)s"
+
+      # مرحله 4: پیدا کردن و آپلود فایل دانلود شده
+      - name: Upload APK as Artifact
+        run: |
+          echo "Searching for downloaded APK file..."
+          find . -name "*.apk" -type f
+          
+          # اگر فایل با نام دیگری ذخیره شد، آن را به efootball.apk تغییر نام دهید
+          if [ -f "efootball.apk" ]; then
+            FINAL_FILE="efootball.apk"
+          else
+            APK_FILE=$(find . -name "*.apk" -type f | head -1)
+            if [ -n "$APK_FILE" ]; then
+              mv "$APK_FILE" efootball.apk
+              FINAL_FILE="efootball.apk"
+            fi
+          fi
+          
+          if [ -n "$FINAL_FILE" ]; then
+            SIZE=$(stat -c%s "$FINAL_FILE")
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            echo "✅ Download successful! File size: ${SIZE_MB} MB"
+          else
+            echo "❌ Download failed - no APK file found"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: efootball
-          path: downloads/efootball.apk
-          
-      - name: Stop WARP
+          name: efootball-10.4.2-warp
+          path: efootball.apk
+          retention-days: 30
+
+      # مرحله 5: توقف کانتینر WARP
+      - name: Stop WARP Container
         if: always()
-        run: docker stop warp || true
+        run: |
+          docker stop warp || true
+          docker rm warp || true
