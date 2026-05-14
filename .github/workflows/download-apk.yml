@@ -1,20 +1,35 @@
-name: Download eFootball 10.4.2 with Linux
+name: Download eFootball 10.4.2 with APKMD (Linux)
 
 on:
   workflow_dispatch:
 
 jobs:
-  download:
+  download-efootball:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 10
+
     steps:
-      - name: Download APKMD Linux
+      # مرحله 1: دانلود فایل apkmd مخصوص لینوکس از ریلیز اصلی
+      - name: Download APKMD Linux executable
         run: |
-          wget https://github.com/tanishqmanuja/apkmirror-downloader/releases/download/v2.0.10/apkmd-linux
-          chmod +x apkmd-linux
-          sudo mv apkmd-linux /usr/local/bin/apkmd
+          echo "Downloading apkmd from official release..."
+          wget -O apkmd https://github.com/tanishqmanuja/apkmirror-downloader/releases/download/v2.0.10/apkmd
           
-      - name: Create config
+          # بررسی دانلود موفق
+          if [ -f "apkmd" ]; then
+            echo "✅ apkmd downloaded successfully"
+            ls -lh apkmd
+          else
+            echo "❌ Download failed"
+            exit 1
+          fi
+          
+          # اجرایی کردن فایل
+          chmod +x apkmd
+          echo "✅ Made apkmd executable"
+
+      # مرحله 2: ساخت فایل کانفیگ (مطابق با کانفیگ شما)
+      - name: Create config file (apps.json)
         run: |
           cat > apps.json << 'EOF'
           {
@@ -33,11 +48,42 @@ jobs:
           }
           EOF
           
-      - name: Download
-        run: apkmd apps.json
-        
-      - name: Upload
+          echo "✅ Config file created:"
+          cat apps.json
+
+      # مرحله 3: اجرای دانلود
+      - name: Download eFootball APK
+        run: |
+          echo "Starting download of eFootball 10.4.2..."
+          ./apkmd apps.json
+          
+          # کمی صبر برای اطمینان از اتمام دانلود و نوشتن فایل
+          sleep 3
+
+      # مرحله 4: پیدا کردن و تأیید فایل APK دانلود شده
+      - name: Verify and locate APK
+        run: |
+          echo "Searching for downloaded APK file..."
+          
+          # جستجوی فایل efootball.apk در دایرکتوری دانلود
+          if [ -f "downloads/efootball.apk" ]; then
+            SIZE=$(stat -c%s "downloads/efootball.apk")
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            echo "✅ eFootball 10.4.2 downloaded successfully!"
+            echo "📁 File: downloads/efootball.apk"
+            echo "📊 Size: ${SIZE_MB} MB"
+            ls -lh downloads/
+          else
+            echo "❌ APK not found in 'downloads' directory!"
+            echo "Trying to find any .apk file in the workspace..."
+            find . -name "*.apk" -type f
+            exit 1
+          fi
+
+      # مرحله 5: آپلود فایل APK به عنوان Artifact
+      - name: Upload APK as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: efootball-10.4.2
+          name: efootall-10.4.2-apk
           path: downloads/efootball.apk
+          retention-days: 30
