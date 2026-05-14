@@ -1,418 +1,143 @@
-name: ⬇️ دانلود از BuzzHeavier با Download URL Generator
+name: 🔗 استخراج لینک مستقیم با Download URL Generator
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: '🔗 لینک‌های دانلود (با فاصله جدا کنید)'
+        description: '🔗 لینک‌ها (با فاصله یا خط جدید جدا کنید)'
         required: true
-        type: string
-      mode:
-        description: '📦 حالت دانلود'
-        required: false
-        default: 'normal'
-        type: choice
-        options:
-          - normal
-          - zip
-      password:
-        description: '🔒 رمز عبور برای فایل زیپ (اختیاری)'
-        required: false
-        default: ''
         type: string
 
 jobs:
-  download:
+  extract-links:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    permissions:
-      contents: write
+    timeout-minutes: 10
+    
     steps:
-      - name: بررسی لینک ورودی
+      - name: نمایش لینک‌های ورودی
         run: |
-          if [ -z "${{ github.event.inputs.urls }}" ]; then
-            echo "❌ لینک دانلود وارد نشده است!"
-            exit 1
-          fi
-          echo "✅ لینک‌های دانلود دریافت شد"
+          echo "📋 لینک‌های ورودی:"
+          echo "${{ github.event.inputs.urls }}"
+          echo ""
 
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: نصب Python
+        uses: actions/setup-python@v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
+          python-version: '3.x'
 
       - name: کلون Download URL Generator
         run: |
           git clone https://github.com/Ryas-Yusenda/Download-URL-Generator.git /tmp/downloader
-          cd /tmp/downloader
-          # ساختار دایرکتوری دانلودر
-          ls -la
-          echo "✅ Download URL Generator دریافت شد"
+          echo "✅ مخزن کلون شد"
+          
+          # نمایش ساختار
+          echo "📁 ساختار پروژه:"
+          ls -la /tmp/downloader/
 
-      - name: نصب پیش‌نیازها
+      - name: نصب نیازمندی‌ها
         run: |
-          sudo apt-get update
-          sudo apt-get install -y aria2 zip curl bc python3 python3-pip
-          # نصب نیازمندی‌های دانلودر
           cd /tmp/downloader
           if [ -f "requirements.txt" ]; then
-            pip3 install -r requirements.txt
+            pip install -r requirements.txt
           fi
-          # نصب پیش‌نیازهای اضافی
-          pip3 install aiohttp beautifulsoup4 cloudscraper
-          echo "✅ پیش‌نیازها نصب شدند"
+          # نصب کتابخانه‌های اضافی که ممکن است نیاز باشد
+          pip install aiohttp beautifulsoup4 cloudscraper requests
+          echo "✅ نیازمندی‌ها نصب شدند"
 
-      - name: آماده‌سازی لینک‌ها و استخراج لینک مستقیم
+      - name: آماده‌سازی و اجرای استخراج
+        id: extract
         run: |
-          URLS="${{ github.event.inputs.urls }}"
+          # ایجاد فایل links.txt
+          echo "${{ github.event.inputs.urls }}" | tr ' ' '\n' | sed '/^$/d' > /tmp/downloader/links.txt
           
-          # ایجاد فایل links.txt برای دانلودر
-          echo "$URLS" | tr ' ' '\n' > /tmp/downloader/links.txt
-          
-          echo "📋 لینک‌های ورودی:"
+          echo "📝 محتوای links.txt:"
           cat /tmp/downloader/links.txt
+          echo ""
           
-          # اجرای دانلودر برای استخراج لینک‌های مستقیم
+          # اجرای process.py
           echo "🔄 در حال استخراج لینک‌های مستقیم..."
           cd /tmp/downloader
           python3 process.py 2>&1 | tee /tmp/process_log.txt
+          EXIT_CODE=$?
           
-          # نمایش خروجی
           echo ""
-          echo "📊 خروجی پردازش:"
+          echo "📊 کد خروج: $EXIT_CODE"
+          
           if [ -f "links_output.txt" ]; then
+            echo "✅ فایل links_output.txt ایجاد شد"
+            echo "محتوای خروجی:"
+            echo "═══════════════════════════════════════"
             cat links_output.txt
-            echo "✅ لینک‌های مستقیم استخراج شدند"
+            echo "═══════════════════════════════════════"
+            
+            # ذخیره محتوا برای مرحله بعد
+            cp links_output.txt /tmp/links_output.txt
+            
+            echo "EXTRACTION_SUCCESS=true" >> $GITHUB_OUTPUT
           else
             echo "❌ فایل links_output.txt ایجاد نشد"
-            # اگر links_output.txt وجود نداشت، ساختار پروژه را بررسی کن
-            echo "ساختار دایرکتوری:"
-            find . -type f -name "*.py" -o -name "*.txt"
+            echo "EXTRACTION_SUCCESS=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: پردازش خروجی و آماده‌سازی برای دانلود
-        id: prepare_downloads
+      - name: پردازش و نمایش نهایی
         run: |
-          # خواندن فایل خروجی و استخراج لینک‌های مستقیم
-          DOWNLOAD_LIST="/tmp/download_list.txt"
-          
-          if [ -f "/tmp/downloader/links_output.txt" ]; then
-            echo "📝 پردازش فایل links_output.txt"
-            
-            # استخراج URLهای دانلود از فایل خروجی
-            # انتظار می‌رود هر خط شامل URL مستقیم باشد
-            grep -o 'https\?://[^[:space:]]*' /tmp/downloader/links_output.txt > "$DOWNLOAD_LIST"
-            
-            echo "🔗 لینک‌های مستقیم استخراج شده:"
-            cat "$DOWNLOAD_LIST"
-          else
-            echo "⚠️ فایل links_output.txt یافت نشد"
-            echo "استفاده از URLهای اصلی به عنوان fallback..."
-            
-            # اگر خروجی نبود، از URLهای اصلی استفاده کن
-            cat /tmp/downloader/links.txt | while read line; do
-              if [ -n "$line" ]; then
-                echo "$line" >> "$DOWNLOAD_LIST"
-              fi
-            done
-          fi
-          
-          # شمارش لینک‌ها
-          TOTAL_LINKS=$(wc -l < "$DOWNLOAD_LIST")
-          echo "📊 تعداد لینک‌های دانلود: $TOTAL_LINKS"
-          echo "TOTAL_LINKS=$TOTAL_LINKS" >> $GITHUB_ENV
-
-      - name: تنظیمات گیت
-        run: |
-          git config --global http.postBuffer 524288000
-          git config --global http.maxRequestBuffer 100M
-          git config --global core.compression 0
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-
-      - name: دانلود فایل‌ها
-        run: |
-          MODE="${{ github.event.inputs.mode }}"
-          ZIP_PASSWORD="${{ github.event.inputs.password }}"
-          SPLIT_THRESHOLD_MB=45
-          
-          BACKUP_DIR="/tmp/download_backup_$$"
-          mkdir -p "$BACKUP_DIR" downloads tmp_downloads
-          
-          echo "📥 شروع دانلود فایل‌ها..."
-          
-          # خواندن لینک‌های مستقیم
-          DOWNLOAD_LIST="/tmp/download_list.txt"
-          DOWNLOAD_COUNT=0
-          
-          while IFS= read -r DIRECT_LINK; do
-            if [ -z "$DIRECT_LINK" ]; then
-              continue
-            fi
-            
-            DOWNLOAD_COUNT=$((DOWNLOAD_COUNT + 1))
-            
-            # استخراج نام فایل از URL
-            FILENAME=$(basename "$DIRECT_LINK" | sed 's/[?#].*//' | sed 's/%20/ /g')
-            
-            # اگر نام فایل خالی بود یا پسوند نداشت
-            if [ -z "$FILENAME" ] || [[ ! "$FILENAME" =~ \. ]]; then
-              # سعی کن از Content-Disposition هدر نام فایل رو بگیری
-              HEADERS=$(curl -sI -L "$DIRECT_LINK" 2>/dev/null)
-              CD_FILENAME=$(echo "$HEADERS" | grep -i "content-disposition" | grep -o 'filename=["\x27]*[^"\x27;]*' | sed 's/filename=["\x27]*//')
-              
-              if [ -n "$CD_FILENAME" ]; then
-                FILENAME="$CD_FILENAME"
-              else
-                # استخراج از URL اصلی
-                ORIGINAL_URL=$(grep "^$DIRECT_LINK$" /tmp/downloader/links.txt 2>/dev/null || echo "")
-                if [ -n "$ORIGINAL_URL" ]; then
-                  FILENAME=$(basename "$ORIGINAL_URL" | sed 's/[?#].*//')
-                else
-                  FILENAME="download_${DOWNLOAD_COUNT}_$(date +%s)"
-                fi
-              fi
-            fi
-            
-            # پاکسازی نام فایل
-            FILENAME=$(echo "$FILENAME" | sed 's/[<>:"|?*]/_/g' | tr -d '\r\n')
-            
-            echo ""
-            echo "📥 [$DOWNLOAD_COUNT] دانلود: $FILENAME"
-            echo "🔗 $DIRECT_LINK"
-            
-            # دانلود با aria2
-            if aria2c \
-              --split=4 \
-              --max-connection-per-server=4 \
-              --min-split-size=20M \
-              --max-tries=5 \
-              --retry-wait=5 \
-              --timeout=60 \
-              --connect-timeout=30 \
-              --allow-overwrite=true \
-              --auto-file-renaming=false \
-              --console-log-level=notice \
-              --dir="tmp_downloads" \
-              --out="$FILENAME" \
-              "$DIRECT_LINK" 2>&1; then
-              echo "✅ [$DOWNLOAD_COUNT] دانلود موفقیت‌آمیز"
-            else
-              echo "⚠️ [$DOWNLOAD_COUNT] aria2 ناموفق - استفاده از curl..."
-              
-              if curl -L -f -# \
-                --retry 3 \
-                --retry-delay 5 \
-                --connect-timeout 30 \
-                --max-time 3600 \
-                -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-                -o "tmp_downloads/$FILENAME" \
-                "$DIRECT_LINK" 2>&1; then
-                echo "✅ [$DOWNLOAD_COUNT] دانلود با curl موفقیت‌آمیز"
-              else
-                echo "❌ [$DOWNLOAD_COUNT] دانلود ناموفق"
-              fi
-            fi
-            
-          done < "$DOWNLOAD_LIST"
-          
           echo ""
-          echo "✅ دانلود $DOWNLOAD_COUNT فایل به پایان رسید"
-
-      - name: پردازش و بسته‌بندی فایل‌ها
-        run: |
-          MODE="${{ github.event.inputs.mode }}"
-          ZIP_PASSWORD="${{ github.event.inputs.password }}"
-          SPLIT_THRESHOLD_MB=45
-          BACKUP_DIR="/tmp/download_backup_$$"
-          
-          echo "📦 پردازش فایل‌های دانلود شده..."
-          
-          # بررسی فایل‌های دانلود شده
-          FILE_COUNT=$(ls -1 tmp_downloads/ 2>/dev/null | wc -l)
-          echo "📊 تعداد فایل‌های دانلود شده: $FILE_COUNT"
-          
-          if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "❌ هیچ فایلی برای پردازش وجود ندارد"
-            exit 1
-          fi
-          
-          if [ "$MODE" = "zip" ]; then
-            echo "📦 حالت zip: ترکیب همه فایل‌ها در یک آرشیو"
-            
-            ARCHIVE_NAME="buzzheavier_bundle_$(date +%Y%m%d_%H%M%S)"
-            FOLDER_NAME="${ARCHIVE_NAME}"
-            mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
-            
-            if [ -n "$ZIP_PASSWORD" ]; then
-              zip -j -P "${ZIP_PASSWORD}" -s ${SPLIT_THRESHOLD_MB}m \
-                "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip" \
-                tmp_downloads/*
-            else
-              zip -j -s ${SPLIT_THRESHOLD_MB}m \
-                "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip" \
-                tmp_downloads/*
-            fi
-            
-            # ایجاد README برای آرشیو
-            {
-              echo "# 📦 $ARCHIVE_NAME"
-              echo ""
-              echo "## فایل‌های موجود در این آرشیو"
-              echo ""
-              echo "| # | نام فایل | حجم |"
-              echo "|---|----------|------|"
-              COUNTER=1
-              for f in tmp_downloads/*; do
-                if [ -f "$f" ]; then
-                  SIZE=$(stat -c%s "$f")
-                  SIZE_MB=$((SIZE / 1024 / 1024))
-                  echo "| $COUNTER | $(basename "$f") | ${SIZE_MB}MB |"
-                  COUNTER=$((COUNTER + 1))
-                fi
-              done
-              echo ""
-              echo "---"
-              echo "📅 تاریخ: $(date '+%Y-%m-%d %H:%M:%S')"
-            } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
-            
-          else
-            echo "📦 حالت normal: هر فایل جداگانه"
-            
-            for FILE in tmp_downloads/*; do
-              [ -f "$FILE" ] || continue
-              
-              BASENAME=$(basename "$FILE")
-              SIZE=$(stat -c%s "$FILE")
-              SIZE_MB=$((SIZE / 1024 / 1024))
-              
-              echo "📦 پردازش: $BASENAME (${SIZE_MB}MB)"
-              
-              FOLDER_NAME="${BASENAME%.*}_$(date +%s)"
-              mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
-              
-              if [ "$SIZE" -gt $((SPLIT_THRESHOLD_MB * 1024 * 1024)) ]; then
-                echo "  ↳ تقسیم به بخش‌های ${SPLIT_THRESHOLD_MB}MB"
-                if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -j -P "${ZIP_PASSWORD}" -s ${SPLIT_THRESHOLD_MB}m \
-                    "$BACKUP_DIR/$FOLDER_NAME/${FOLDER_NAME}.zip" "$FILE"
-                else
-                  zip -j -s ${SPLIT_THRESHOLD_MB}m \
-                    "$BACKUP_DIR/$FOLDER_NAME/${FOLDER_NAME}.zip" "$FILE"
-                fi
-              else
-                echo "  ↳ ایجاد آرشیو"
-                if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -j -P "${ZIP_PASSWORD}" \
-                    "$BACKUP_DIR/$FOLDER_NAME/${FOLDER_NAME}.zip" "$FILE"
-                else
-                  zip -j "$BACKUP_DIR/$FOLDER_NAME/${FOLDER_NAME}.zip" "$FILE"
-                fi
-              fi
-              
-              # ایجاد README
-              {
-                echo "# 📁 $BASENAME"
-                echo ""
-                echo "| مشخصات | مقدار |"
-                echo "|--------|-------|"
-                echo "| **نام فایل** | \`$BASENAME\` |"
-                echo "| **حجم** | ${SIZE_MB}MB |"
-                echo "| **منبع** | BuzzHeavier |"
-                echo "| **تاریخ** | $(date '+%Y-%m-%d %H:%M:%S') |"
-                echo ""
-                echo "## راهنما"
-                echo "1. فایل(های) zip را دانلود کنید"
-                echo "2. با WinRAR یا 7-Zip استخراج کنید"
-                if [ -n "$ZIP_PASSWORD" ]; then
-                  echo "3. رمز عبور را وارد کنید"
-                fi
-              } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
-            done
-          fi
-          
-          # کپی به پوشه downloads
-          cp -r "$BACKUP_DIR"/* downloads/ 2>/dev/null || true
-          
-          echo "✅ پردازش و بسته‌بندی کامل شد"
-          
-          # نمایش فایل‌های نهایی
+          echo "🎯 =========================================="
+          echo "🎯     لینک‌های مستقیم استخراج شده"
+          echo "🎯 =========================================="
           echo ""
-          echo "📊 فایل‌های آماده شده:"
-          find downloads -type f -exec ls -lh {} \; 2>/dev/null | head -20
-
-      - name: بروزرسانی README اصلی
-        run: |
-          {
-            echo "# 📥 فایل‌های دانلود شده از BuzzHeavier"
-            echo ""
-            echo "## 📊 آمار"
-            echo ""
-            echo "- **تعداد فایل‌ها**: $(find downloads -type f -name '*.zip' -o -name '*.z*' | wc -l) بخش"
-            echo "- **تاریخ**: $(date '+%Y-%m-%d %H:%M:%S')"
-            echo "- **منبع**: BuzzHeavier via Download URL Generator"
-            echo ""
-            echo "## 📁 لیست فایل‌ها"
-            echo ""
-            
-            for folder in downloads/*/; do
-              if [ -d "$folder" ]; then
-                FOLDER_NAME=$(basename "$folder")
-                echo "### 📦 $FOLDER_NAME"
-                echo ""
-                for file in "$folder"/*; do
-                  if [ -f "$file" ]; then
-                    FILENAME=$(basename "$file")
-                    SIZE=$(du -h "$file" | cut -f1)
-                    echo "- 📄 \`$FILENAME\` ($SIZE)"
-                  fi
-                done
-                echo ""
+          
+          if [ -f "/tmp/links_output.txt" ] && [ -s "/tmp/links_output.txt" ]; then
+            # خواندن و پردازش فایل خروجی
+            LINK_COUNT=0
+            while IFS= read -r line; do
+              if [ -z "$line" ]; then
+                continue
               fi
-            done
+              
+              LINK_COUNT=$((LINK_COUNT + 1))
+              
+              # بررسی اگر خط شامل URL است
+              if [[ "$line" =~ ^https?:// ]]; then
+                echo "$LINK_COUNT. $line"
+              else
+                # سعی در استخراج URL از خط
+                URL=$(echo "$line" | grep -oP 'https?://[^\s"'\'']+' | head -1)
+                if [ -n "$URL" ]; then
+                  echo "$LINK_COUNT. $URL"
+                else
+                  echo "$LINK_COUNT. $line (فرمت نامشخص)"
+                fi
+              fi
+            done < "/tmp/links_output.txt"
             
-            echo "---"
-            echo "🔧 **ابزار استفاده شده**: [Download URL Generator](https://github.com/Ryas-Yusenda/Download-URL-Generator)"
-          } > "downloads/README.md"
-          
-          echo "✅ README بروزرسانی شد"
-
-      - name: آپلود نهایی در گیتهاب
-        run: |
-          echo "📤 شروع آپلود..."
-          
-          # اضافه کردن فایل‌ها
-          git add -f downloads/ 2>/dev/null || true
-          git add README.md 2>/dev/null || true
-          
-          if git diff --cached --quiet 2>/dev/null; then
-            echo "ℹ️ تغییری برای commit وجود ندارد"
-            exit 0
-          fi
-          
-          git commit -m "📥 آپلود فایل‌های BuzzHeavier [skip ci]"
-          
-          # تلاش برای push
-          SUCCESS=false
-          for i in {1..5}; do
-            echo "🔄 تلاش $i برای push..."
-            if timeout 300 git push origin "${GITHUB_REF_NAME}" 2>&1; then
-              SUCCESS=true
-              echo "✅ آپلود موفقیت‌آمیز بود!"
-              break
-            fi
-            echo "⚠️ تلاش $i ناموفق - انتظار 15 ثانیه..."
-            sleep 15
-            git pull --rebase origin "${GITHUB_REF_NAME}" 2>/dev/null || true
-          done
-          
-          if [ "$SUCCESS" = true ]; then
             echo ""
-            echo "🎉 عملیات با موفقیت به پایان رسید!"
-            echo "🔗 لینک دانلود:"
-            echo "${{ github.server_url }}/${{ github.repository }}/tree/${{ github.ref_name }}/downloads"
+            echo "📊 تعداد لینک‌های استخراج شده: $LINK_COUNT"
+            
+          elif [ -f "/tmp/downloader/links_output.txt" ] && [ -s "/tmp/downloader/links_output.txt" ]; then
+            echo "محتوای فایل خروجی:"
+            cat /tmp/downloader/links_output.txt
           else
-            echo "❌ خطا در آپلود"
-            exit 1
+            echo "⚠️ هیچ لینکی استخراج نشد"
+            echo ""
+            echo "📋 لاگ پردازش:"
+            cat /tmp/process_log.txt
+            
+            echo ""
+            echo "💡 راهنمایی:"
+            echo "- مطمئن شوید لینک‌ها معتبر و قابل دسترسی هستند"
+            echo "- فایل ممکن است پاک شده باشد"
+            echo "- سایت ممکن است مسدود یا نیاز به احراز هویت داشته باشد"
           fi
+
+      - name: ذخیره خروجی به عنوان آرتیفکت
+        uses: actions/upload-artifact@v4
+        with:
+          name: extracted-links
+          path: |
+            /tmp/links_output.txt
+            /tmp/process_log.txt
+          retention-days: 7
