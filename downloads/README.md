@@ -1,11 +1,9 @@
 # Downloaded list :
 
-- [_ocean_27824](./_ocean_27824)
-- [apkmd](./apkmd)
 - [download](./download)
+- [efootball.apk.v10.4.2](./efootball.apk.v10.4.2)
 - [kali-linux-2026.1-wsl-rootfs-amd64](./kali-linux-2026.1-wsl-rootfs-amd64)
 - [kali-nethunter-rootfs-full-arm64.tar](./kali-nethunter-rootfs-full-arm64.tar)
-- [mhrv-rs-windows-amd64](./mhrv-rs-windows-amd64)
 
 ---
 
