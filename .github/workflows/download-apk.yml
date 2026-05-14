@@ -1,26 +1,37 @@
-name: Download eFootball 10.4.2
+name: Download eFootball with WARP
 
 on:
   workflow_dispatch:
 
 jobs:
   download:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     
     steps:
-      - name: Download APKMD
+      - name: Start WARP
         run: |
-          curl -L -o apkmd.exe https://github.com/tanishqmanuja/apkmirror-downloader/releases/download/v2.0.10/apkmd-win.exe
-      
-      - name: Create config
-        run: |
-          echo '{"options":{"arch":"arm64-v8a","outDir":"downloads"},"apps":[{"org":"konami","repo":"pes2017-pro-evolution-soccer","outFile":"efootball","version":"10.4.2"}]}' > apps.json
-      
+          docker run -d --name warp --cap-add NET_ADMIN -p 1080:1080 caomingjun/warp
+          sleep 15
+          
       - name: Download
-        run: ./apkmd.exe apps.json
-      
+        uses: Yakov5776/gh-apkmirror-dl@v1.3
+        with:
+          org: "konami"
+          repo: "pes2017-pro-evolution-soccer"
+          version: "10.4.2"
+          arch: "arm64-v8a"
+          dpi: "nodpi"
+          filename: "efootball.apk"
+        env:
+          https_proxy: socks5://127.0.0.1:1080
+          http_proxy: socks5://127.0.0.1:1080
+          
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: efootball-10.4.2
-          path: downloads/efootball.apk
+          path: efootball.apk
+          
+      - name: Stop WARP
+        if: always()
+        run: docker stop warp || true
