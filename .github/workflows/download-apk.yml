@@ -1,4 +1,4 @@
-name: Download eFootball 10.4.2
+name: Download eFootball via NPX
 
 on:
   workflow_dispatch:
@@ -8,19 +8,22 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Download using gh-apkmirror-dl
-        uses: Yakov5776/gh-apkmirror-dl@v1.3
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          org: "konami"
-          repo: "pes2017-pro-evolution-soccer"
-          version: "10.4.2"
-          arch: "arm64-v8a"
-          dpi: "nodpi"
-          bundle: "false"
-          filename: "efootball.apk"
+          node-version: '20'
           
+      - name: Download eFootball
+        run: |
+          npx apkmirror-downloader@2.0.10 download konami pes2017-pro-evolution-soccer \
+            --arch arm64-v8a \
+            --dpi nodpi \
+            --version 10.4.2 \
+            --outDir downloads \
+            --outFile efootball.apk
+            
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: efootball-10.4.2
-          path: efootball.apk
+          path: downloads/efootball.apk
