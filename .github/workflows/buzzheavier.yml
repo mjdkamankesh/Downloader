@@ -1,10 +1,10 @@
-name: ⬇️ دانلود از BuzzHeavier
+name: ⬇️ دانلود از BuzzHeavier با Download URL Generator
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: '🔗 لینک‌های BuzzHeavier (با فاصله جدا کنید)'
+        description: '🔗 لینک‌های دانلود (با فاصله جدا کنید)'
         required: true
         type: string
       mode:
@@ -42,195 +42,86 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
+      - name: کلون Download URL Generator
+        run: |
+          git clone https://github.com/Ryas-Yusenda/Download-URL-Generator.git /tmp/downloader
+          cd /tmp/downloader
+          # ساختار دایرکتوری دانلودر
+          ls -la
+          echo "✅ Download URL Generator دریافت شد"
+
       - name: نصب پیش‌نیازها
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 zip curl bc python3 python3-pip
-          pip3 install requests beautifulsoup4 tqdm cloudscraper
+          # نصب نیازمندی‌های دانلودر
+          cd /tmp/downloader
+          if [ -f "requirements.txt" ]; then
+            pip3 install -r requirements.txt
+          fi
+          # نصب پیش‌نیازهای اضافی
+          pip3 install aiohttp beautifulsoup4 cloudscraper
+          echo "✅ پیش‌نیازها نصب شدند"
 
-      - name: آماده‌سازی اسکریپت BuzzHeavier
+      - name: آماده‌سازی لینک‌ها و استخراج لینک مستقیم
         run: |
-          cat > bhdownload.py << 'PYEOF'
-          import cloudscraper
-          from bs4 import BeautifulSoup
-          import sys
-          import re
-          import json
-          import urllib.parse
+          URLS="${{ github.event.inputs.urls }}"
           
-          def get_direct_link(url_or_id):
-              # استخراج ID از URL
-              original_input = url_or_id
-              if '/' in url_or_id:
-                  url_or_id = url_or_id.rstrip('/').split('/')[-1]
-              
-              # حذف پارامترهای اضافی
-              url_or_id = url_or_id.split('?')[0].split('#')[0]
-              
-              if len(url_or_id) != 12:
-                  print(f"Error: Invalid ID length: {url_or_id}", file=sys.stderr)
-                  return None, None
-              
-              print(f"[DEBUG] Processing ID: {url_or_id}", file=sys.stderr)
-              
-              # استفاده از cloudscraper برای دور زدن Cloudflare
-              scraper = cloudscraper.create_scraper(
-                  browser={
-                      'browser': 'chrome',
-                      'platform': 'windows',
-                      'mobile': False
-                  }
-              )
-              
-              headers = {
-                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                  'Accept-Language': 'en-US,en;q=0.5',
-                  'Accept-Encoding': 'gzip, deflate, br',
-                  'DNT': '1',
-                  'Connection': 'keep-alive',
-                  'Upgrade-Insecure-Requests': '1',
-                  'Sec-Fetch-Dest': 'document',
-                  'Sec-Fetch-Mode': 'navigate',
-                  'Sec-Fetch-Site': 'none',
-                  'Sec-Fetch-User': '?1',
-                  'Cache-Control': 'max-age=0'
-              }
-              
-              try:
-                  # روش اول: API مستقیم
-                  print(f"[DEBUG] Trying API method...", file=sys.stderr)
-                  api_url = f"https://buzzheavier.com/api/download/{url_or_id}"
-                  response = scraper.get(api_url, headers=headers, timeout=30)
-                  
-                  if response.status_code == 200:
-                      try:
-                          data = response.json()
-                          if 'url' in data and data['url']:
-                              download_link = data['url']
-                              filename = data.get('name', '')
-                              print(f"[DEBUG] API Success - Filename: {filename}", file=sys.stderr)
-                              print(f"[DEBUG] Download URL: {download_link}", file=sys.stderr)
-                              return download_link, filename
-                      except:
-                          pass
-                  
-                  # روش دوم: اسکرپ صفحه اصلی
-                  print(f"[DEBUG] Trying page scraping...", file=sys.stderr)
-                  main_url = f"https://buzzheavier.com/{url_or_id}"
-                  response = scraper.get(main_url, headers=headers, timeout=30)
-                  
-                  if response.status_code == 200:
-                      soup = BeautifulSoup(response.text, 'html.parser')
-                      
-                      # ذخیره HTML برای دیباگ
-                      with open('/tmp/buzzheavier_debug.html', 'w', encoding='utf-8') as f:
-                          f.write(response.text)
-                      print(f"[DEBUG] Page HTML saved to /tmp/buzzheavier_debug.html", file=sys.stderr)
-                      
-                      # استخراج نام فایل
-                      filename = None
-                      title_tag = soup.find('title')
-                      if title_tag and title_tag.text.strip():
-                          filename = title_tag.text.strip()
-                          print(f"[DEBUG] Title found: {filename}", file=sys.stderr)
-                      
-                      # جستجوی لینک دانلود در تمام اسکریپت‌ها
-                      for script in soup.find_all('script'):
-                          if script.string:
-                              # جستجوی URLهای مختلف
-                              patterns = [
-                                  r'"(https?://[^"]*download[^"]*)"',
-                                  r'"(https?://[^"]*cdn[^"]*)"',
-                                  r'"(https?://[^"]*buzzheavier[^"]*)"',
-                                  r'"(https?://[^"]*\.zip[^"]*)"',
-                                  r'"(https?://[^"]*\.rar[^"]*)"',
-                                  r'"(https?://[^"]*\.7z[^"]*)"',
-                                  r'downloadUrl["\s:=]+["\']([^"\']+)["\']',
-                                  r'url["\s:=]+["\']([^"\']+)["\']',
-                              ]
-                              
-                              for pattern in patterns:
-                                  matches = re.findall(pattern, script.string, re.IGNORECASE)
-                                  for match in matches:
-                                      if match.startswith('http') and url_or_id in match:
-                                          print(f"[DEBUG] Found download link in script: {match}", file=sys.stderr)
-                                          return match, filename
-                      
-                      # جستجو در لینک‌های صفحه
-                      for a in soup.find_all('a', href=True):
-                          href = a['href']
-                          if 'download' in href.lower() and url_or_id in href:
-                              print(f"[DEBUG] Found download link in href: {href}", file=sys.stderr)
-                              return href, filename
-                      
-                      # جستجوی دکمه دانلود
-                      download_button = soup.find('button', {'id': 'download-button'})
-                      if download_button and download_button.get('onclick'):
-                          onclick = download_button.get('onclick')
-                          url_match = re.search(r"window\.location\.href=['\"]([^'\"]+)['\"]", onclick)
-                          if url_match:
-                              download_link = url_match.group(1)
-                              print(f"[DEBUG] Found download link in button: {download_link}", file=sys.stderr)
-                              return download_link, filename
-                      
-                      # روش سوم: API جایگزین
-                      print(f"[DEBUG] Trying alternative API...", file=sys.stderr)
-                      alt_api_url = f"https://buzzheavier.com/{url_or_id}/download"
-                      response = scraper.get(alt_api_url, headers=headers, allow_redirects=False, timeout=30)
-                      
-                      if response.status_code in [301, 302, 303, 307, 308]:
-                          redirect_url = response.headers.get('Location', '')
-                          if redirect_url:
-                              print(f"[DEBUG] Redirect found: {redirect_url}", file=sys.stderr)
-                              return redirect_url, filename
-                      
-                      # روش چهارم: ساخت لینک مستقیم
-                      print(f"[DEBUG] Trying to construct direct link...", file=sys.stderr)
-                      constructed_url = f"https://buzzheavier.com/{url_or_id}/download?direct=true"
-                      response = scraper.head(constructed_url, headers=headers, allow_redirects=True, timeout=30)
-                      if response.url != constructed_url:
-                          print(f"[DEBUG] Constructed redirect: {response.url}", file=sys.stderr)
-                          return response.url, filename
-                  
-                  print(f"Error: Download link not found for {url_or_id}", file=sys.stderr)
-                  return None, filename
-                  
-              except Exception as e:
-                  print(f"Error: {str(e)}", file=sys.stderr)
-                  import traceback
-                  traceback.print_exc(file=sys.stderr)
-                  return None, None
+          # ایجاد فایل links.txt برای دانلودر
+          echo "$URLS" | tr ' ' '\n' > /tmp/downloader/links.txt
+          
+          echo "📋 لینک‌های ورودی:"
+          cat /tmp/downloader/links.txt
+          
+          # اجرای دانلودر برای استخراج لینک‌های مستقیم
+          echo "🔄 در حال استخراج لینک‌های مستقیم..."
+          cd /tmp/downloader
+          python3 process.py 2>&1 | tee /tmp/process_log.txt
+          
+          # نمایش خروجی
+          echo ""
+          echo "📊 خروجی پردازش:"
+          if [ -f "links_output.txt" ]; then
+            cat links_output.txt
+            echo "✅ لینک‌های مستقیم استخراج شدند"
+          else
+            echo "❌ فایل links_output.txt ایجاد نشد"
+            # اگر links_output.txt وجود نداشت، ساختار پروژه را بررسی کن
+            echo "ساختار دایرکتوری:"
+            find . -type f -name "*.py" -o -name "*.txt"
+          fi
 
-          if __name__ == "__main__":
-              if len(sys.argv) < 2:
-                  print("Usage: python3 bhdownload.py <id_or_url>")
-                  sys.exit(1)
-              
-              input_arg = sys.argv[1].rstrip('/')
-              
-              if input_arg == '-f' and len(sys.argv) > 2:
-                  with open(sys.argv[2], 'r') as f:
-                      for line in f:
-                          line = line.strip()
-                          if line:
-                              download_link, filename = get_direct_link(line)
-                              if download_link:
-                                  print(f"DOWNLOAD_LINK:{download_link}")
-                                  if filename:
-                                      print(f"FILENAME:{filename}")
-                                  print("---")
-              else:
-                  download_link, filename = get_direct_link(input_arg)
-                  if download_link:
-                      print(f"DOWNLOAD_LINK:{download_link}")
-                      if filename:
-                          print(f"FILENAME:{filename}")
-                  else:
-                      print("ERROR: Could not extract download link")
-          PYEOF
+      - name: پردازش خروجی و آماده‌سازی برای دانلود
+        id: prepare_downloads
+        run: |
+          # خواندن فایل خروجی و استخراج لینک‌های مستقیم
+          DOWNLOAD_LIST="/tmp/download_list.txt"
           
-          chmod +x bhdownload.py
+          if [ -f "/tmp/downloader/links_output.txt" ]; then
+            echo "📝 پردازش فایل links_output.txt"
+            
+            # استخراج URLهای دانلود از فایل خروجی
+            # انتظار می‌رود هر خط شامل URL مستقیم باشد
+            grep -o 'https\?://[^[:space:]]*' /tmp/downloader/links_output.txt > "$DOWNLOAD_LIST"
+            
+            echo "🔗 لینک‌های مستقیم استخراج شده:"
+            cat "$DOWNLOAD_LIST"
+          else
+            echo "⚠️ فایل links_output.txt یافت نشد"
+            echo "استفاده از URLهای اصلی به عنوان fallback..."
+            
+            # اگر خروجی نبود، از URLهای اصلی استفاده کن
+            cat /tmp/downloader/links.txt | while read line; do
+              if [ -n "$line" ]; then
+                echo "$line" >> "$DOWNLOAD_LIST"
+              fi
+            done
+          fi
+          
+          # شمارش لینک‌ها
+          TOTAL_LINKS=$(wc -l < "$DOWNLOAD_LIST")
+          echo "📊 تعداد لینک‌های دانلود: $TOTAL_LINKS"
+          echo "TOTAL_LINKS=$TOTAL_LINKS" >> $GITHUB_ENV
 
       - name: تنظیمات گیت
         run: |
@@ -243,145 +134,152 @@ jobs:
       - name: دانلود فایل‌ها
         run: |
           MODE="${{ github.event.inputs.mode }}"
-          URLS="${{ github.event.inputs.urls }}"
           ZIP_PASSWORD="${{ github.event.inputs.password }}"
-          
           SPLIT_THRESHOLD_MB=45
+          
           BACKUP_DIR="/tmp/download_backup_$$"
-          mkdir -p "$BACKUP_DIR"
-          mkdir -p downloads tmp_downloads
+          mkdir -p "$BACKUP_DIR" downloads tmp_downloads
           
-          echo "📥 شروع دانلود از BuzzHeavier..."
+          echo "📥 شروع دانلود فایل‌ها..."
           
-          # پردازش هر لینک
-          for URL in $URLS; do
-            echo "🔍 پردازش لینک: $URL"
+          # خواندن لینک‌های مستقیم
+          DOWNLOAD_LIST="/tmp/download_list.txt"
+          DOWNLOAD_COUNT=0
+          
+          while IFS= read -r DIRECT_LINK; do
+            if [ -z "$DIRECT_LINK" ]; then
+              continue
+            fi
             
-            # اجرای اسکریپت و ذخیره خروجی
-            OUTPUT=$(python3 bhdownload.py "$URL" 2>/tmp/bh_error.log)
-            EXIT_CODE=$?
+            DOWNLOAD_COUNT=$((DOWNLOAD_COUNT + 1))
             
-            # نمایش لاگ برای دیباگ
-            echo "📋 لاگ اسکریپت:"
-            cat /tmp/bh_error.log
+            # استخراج نام فایل از URL
+            FILENAME=$(basename "$DIRECT_LINK" | sed 's/[?#].*//' | sed 's/%20/ /g')
             
-            # استخراج لینک دانلود و نام فایل از خروجی
-            DIRECT_LINK=$(echo "$OUTPUT" | grep "DOWNLOAD_LINK:" | cut -d':' -f2-)
-            FILENAME=$(echo "$OUTPUT" | grep "FILENAME:" | cut -d':' -f2-)
-            
-            if [ -n "$DIRECT_LINK" ]; then
-              # اگر نام فایل پیدا نشد، از URL استخراج کن
-              if [ -z "$FILENAME" ]; then
-                # سعی کن از لینک مستقیم نام فایل رو بگیری
-                FILENAME=$(basename "$DIRECT_LINK" | sed 's/[?#].*//')
-                # اگر باز هم خالی بود، از URL اصلی استفاده کن
-                if [ -z "$FILENAME" ]; then
-                  FILENAME="download_$(date +%s)"
-                fi
-              fi
+            # اگر نام فایل خالی بود یا پسوند نداشت
+            if [ -z "$FILENAME" ] || [[ ! "$FILENAME" =~ \. ]]; then
+              # سعی کن از Content-Disposition هدر نام فایل رو بگیری
+              HEADERS=$(curl -sI -L "$DIRECT_LINK" 2>/dev/null)
+              CD_FILENAME=$(echo "$HEADERS" | grep -i "content-disposition" | grep -o 'filename=["\x27]*[^"\x27;]*' | sed 's/filename=["\x27]*//')
               
-              # پاکسازی نام فایل
-              FILENAME=$(echo "$FILENAME" | sed 's/[<>:"|?*]/_/g' | sed 's/%20/ /g')
-              
-              echo "📁 نام فایل: $FILENAME"
-              echo "🔗 لینک مستقیم: $DIRECT_LINK"
-              
-              # دانلود با aria2
-              echo "⏬ شروع دانلود..."
-              if aria2c \
-                --split=4 \
-                --max-connection-per-server=4 \
-                --min-split-size=20M \
-                --max-tries=5 \
-                --retry-wait=5 \
-                --timeout=60 \
-                --connect-timeout=30 \
-                --allow-overwrite=true \
-                --auto-file-renaming=false \
-                --dir="tmp_downloads" \
-                --out="$FILENAME" \
-                "$DIRECT_LINK" 2>&1; then
-                echo "✅ دانلود موفقیت‌آمیز بود"
+              if [ -n "$CD_FILENAME" ]; then
+                FILENAME="$CD_FILENAME"
               else
-                echo "⚠️ دانلود با aria2 ناموفق بود، استفاده از curl..."
-                if curl -L -f -# \
-                  --retry 3 \
-                  --retry-delay 5 \
-                  --connect-timeout 30 \
-                  --max-time 3600 \
-                  -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-                  -o "tmp_downloads/$FILENAME" \
-                  "$DIRECT_LINK"; then
-                  echo "✅ دانلود با curl موفقیت‌آمیز بود"
+                # استخراج از URL اصلی
+                ORIGINAL_URL=$(grep "^$DIRECT_LINK$" /tmp/downloader/links.txt 2>/dev/null || echo "")
+                if [ -n "$ORIGINAL_URL" ]; then
+                  FILENAME=$(basename "$ORIGINAL_URL" | sed 's/[?#].*//')
                 else
-                  echo "❌ دانلود ناموفق بود"
+                  FILENAME="download_${DOWNLOAD_COUNT}_$(date +%s)"
                 fi
               fi
+            fi
+            
+            # پاکسازی نام فایل
+            FILENAME=$(echo "$FILENAME" | sed 's/[<>:"|?*]/_/g' | tr -d '\r\n')
+            
+            echo ""
+            echo "📥 [$DOWNLOAD_COUNT] دانلود: $FILENAME"
+            echo "🔗 $DIRECT_LINK"
+            
+            # دانلود با aria2
+            if aria2c \
+              --split=4 \
+              --max-connection-per-server=4 \
+              --min-split-size=20M \
+              --max-tries=5 \
+              --retry-wait=5 \
+              --timeout=60 \
+              --connect-timeout=30 \
+              --allow-overwrite=true \
+              --auto-file-renaming=false \
+              --console-log-level=notice \
+              --dir="tmp_downloads" \
+              --out="$FILENAME" \
+              "$DIRECT_LINK" 2>&1; then
+              echo "✅ [$DOWNLOAD_COUNT] دانلود موفقیت‌آمیز"
             else
-              echo "❌ خطا در دریافت لینک مستقیم برای: $URL"
-              echo "خروجی اسکریپت: $OUTPUT"
+              echo "⚠️ [$DOWNLOAD_COUNT] aria2 ناموفق - استفاده از curl..."
               
-              # روش fallback: دانلود مستقیم با curl از URL اصلی
-              echo "🔄 استفاده از روش جایگزین..."
-              FILENAME="buzzheavier_$(date +%s)"
               if curl -L -f -# \
                 --retry 3 \
                 --retry-delay 5 \
                 --connect-timeout 30 \
                 --max-time 3600 \
                 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-                -H "Referer: https://buzzheavier.com/" \
                 -o "tmp_downloads/$FILENAME" \
-                "$URL"; then
-                echo "✅ دانلود با روش جایگزین موفق بود"
+                "$DIRECT_LINK" 2>&1; then
+                echo "✅ [$DOWNLOAD_COUNT] دانلود با curl موفقیت‌آمیز"
               else
-                echo "❌ تمام روش‌های دانلود ناموفق بودند"
+                echo "❌ [$DOWNLOAD_COUNT] دانلود ناموفق"
               fi
             fi
             
-            echo "---"
-          done
+          done < "$DOWNLOAD_LIST"
           
-          # پردازش فایل‌های دانلود شده
+          echo ""
+          echo "✅ دانلود $DOWNLOAD_COUNT فایل به پایان رسید"
+
+      - name: پردازش و بسته‌بندی فایل‌ها
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          ZIP_PASSWORD="${{ github.event.inputs.password }}"
+          SPLIT_THRESHOLD_MB=45
+          BACKUP_DIR="/tmp/download_backup_$$"
+          
           echo "📦 پردازش فایل‌های دانلود شده..."
           
+          # بررسی فایل‌های دانلود شده
+          FILE_COUNT=$(ls -1 tmp_downloads/ 2>/dev/null | wc -l)
+          echo "📊 تعداد فایل‌های دانلود شده: $FILE_COUNT"
+          
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "❌ هیچ فایلی برای پردازش وجود ندارد"
+            exit 1
+          fi
+          
           if [ "$MODE" = "zip" ]; then
-            # حالت zip: همه فایل‌ها در یک آرشیو
-            if [ -n "$(ls -A tmp_downloads 2>/dev/null)" ]; then
-              ARCHIVE_NAME="buzzheavier_$(date +%Y%m%d_%H%M%S)"
-              FOLDER_NAME="${ARCHIVE_NAME}"
-              mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
-              
-              echo "📦 ایجاد آرشیو $ARCHIVE_NAME.zip..."
-              if [ -n "$ZIP_PASSWORD" ]; then
-                zip -j -P "${ZIP_PASSWORD}" -s ${SPLIT_THRESHOLD_MB}m \
-                  "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip" \
-                  tmp_downloads/*
-              else
-                zip -j -s ${SPLIT_THRESHOLD_MB}m \
-                  "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip" \
-                  tmp_downloads/*
-              fi
-              
-              # ایجاد README
-              {
-                echo "# 📦 $ARCHIVE_NAME"
-                echo ""
-                echo "## فایل‌های دانلود شده از BuzzHeavier"
-                echo ""
-                echo "| # | نام فایل | حجم |"
-                echo "|---|----------|------|"
-                for f in tmp_downloads/*; do
-                  if [ -f "$f" ]; then
-                    SIZE=$(stat -c%s "$f")
-                    SIZE_MB=$((SIZE / 1024 / 1024))
-                    echo "| | $(basename "$f") | ${SIZE_MB}MB |"
-                  fi
-                done
-              } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
+            echo "📦 حالت zip: ترکیب همه فایل‌ها در یک آرشیو"
+            
+            ARCHIVE_NAME="buzzheavier_bundle_$(date +%Y%m%d_%H%M%S)"
+            FOLDER_NAME="${ARCHIVE_NAME}"
+            mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+            
+            if [ -n "$ZIP_PASSWORD" ]; then
+              zip -j -P "${ZIP_PASSWORD}" -s ${SPLIT_THRESHOLD_MB}m \
+                "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip" \
+                tmp_downloads/*
+            else
+              zip -j -s ${SPLIT_THRESHOLD_MB}m \
+                "$BACKUP_DIR/$FOLDER_NAME/${ARCHIVE_NAME}.zip" \
+                tmp_downloads/*
             fi
+            
+            # ایجاد README برای آرشیو
+            {
+              echo "# 📦 $ARCHIVE_NAME"
+              echo ""
+              echo "## فایل‌های موجود در این آرشیو"
+              echo ""
+              echo "| # | نام فایل | حجم |"
+              echo "|---|----------|------|"
+              COUNTER=1
+              for f in tmp_downloads/*; do
+                if [ -f "$f" ]; then
+                  SIZE=$(stat -c%s "$f")
+                  SIZE_MB=$((SIZE / 1024 / 1024))
+                  echo "| $COUNTER | $(basename "$f") | ${SIZE_MB}MB |"
+                  COUNTER=$((COUNTER + 1))
+                fi
+              done
+              echo ""
+              echo "---"
+              echo "📅 تاریخ: $(date '+%Y-%m-%d %H:%M:%S')"
+            } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
+            
           else
-            # حالت normal: هر فایل جداگانه
+            echo "📦 حالت normal: هر فایل جداگانه"
+            
             for FILE in tmp_downloads/*; do
               [ -f "$FILE" ] || continue
               
@@ -389,17 +287,13 @@ jobs:
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              echo "📦 پردازش فایل: $BASENAME (${SIZE_MB}MB)"
+              echo "📦 پردازش: $BASENAME (${SIZE_MB}MB)"
               
-              FOLDER_NAME="${BASENAME%.*}"
-              # اطمینان از یکتا بودن نام پوشه
-              if [ -d "$BACKUP_DIR/$FOLDER_NAME" ]; then
-                FOLDER_NAME="${FOLDER_NAME}_$(date +%s)"
-              fi
+              FOLDER_NAME="${BASENAME%.*}_$(date +%s)"
               mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
               
               if [ "$SIZE" -gt $((SPLIT_THRESHOLD_MB * 1024 * 1024)) ]; then
-                echo "📦 فایل بزرگ - تقسیم به بخش‌های ${SPLIT_THRESHOLD_MB}MB"
+                echo "  ↳ تقسیم به بخش‌های ${SPLIT_THRESHOLD_MB}MB"
                 if [ -n "$ZIP_PASSWORD" ]; then
                   zip -j -P "${ZIP_PASSWORD}" -s ${SPLIT_THRESHOLD_MB}m \
                     "$BACKUP_DIR/$FOLDER_NAME/${FOLDER_NAME}.zip" "$FILE"
@@ -408,7 +302,7 @@ jobs:
                     "$BACKUP_DIR/$FOLDER_NAME/${FOLDER_NAME}.zip" "$FILE"
                 fi
               else
-                echo "📦 فایل کوچک - ایجاد آرشیو"
+                echo "  ↳ ایجاد آرشیو"
                 if [ -n "$ZIP_PASSWORD" ]; then
                   zip -j -P "${ZIP_PASSWORD}" \
                     "$BACKUP_DIR/$FOLDER_NAME/${FOLDER_NAME}.zip" "$FILE"
@@ -417,7 +311,7 @@ jobs:
                 fi
               fi
               
-              # ایجاد README برای هر فایل
+              # ایجاد README
               {
                 echo "# 📁 $BASENAME"
                 echo ""
@@ -426,9 +320,9 @@ jobs:
                 echo "| **نام فایل** | \`$BASENAME\` |"
                 echo "| **حجم** | ${SIZE_MB}MB |"
                 echo "| **منبع** | BuzzHeavier |"
-                echo "| **تاریخ دانلود** | $(date '+%Y-%m-%d %H:%M:%S') |"
+                echo "| **تاریخ** | $(date '+%Y-%m-%d %H:%M:%S') |"
                 echo ""
-                echo "## نحوه استفاده"
+                echo "## راهنما"
                 echo "1. فایل(های) zip را دانلود کنید"
                 echo "2. با WinRAR یا 7-Zip استخراج کنید"
                 if [ -n "$ZIP_PASSWORD" ]; then
@@ -439,78 +333,86 @@ jobs:
           fi
           
           # کپی به پوشه downloads
-          if [ -d "$BACKUP_DIR" ] && [ "$(ls -A $BACKUP_DIR 2>/dev/null)" ]; then
-            cp -r "$BACKUP_DIR"/* downloads/ 2>/dev/null || true
-            echo "✅ فایل‌ها به پوشه downloads کپی شدند"
-          else
-            echo "⚠️ هیچ فایلی برای کپی وجود ندارد"
-          fi
+          cp -r "$BACKUP_DIR"/* downloads/ 2>/dev/null || true
           
-          # ذخیره مسیر برای استفاده در مراحل بعدی
-          echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
+          echo "✅ پردازش و بسته‌بندی کامل شد"
           
-          echo "✅ دانلود و پردازش کامل شد"
-          
-          # نمایش فایل‌های دانلود شده
+          # نمایش فایل‌های نهایی
           echo ""
-          echo "📊 خلاصه فایل‌های دانلود شده:"
-          find downloads -type f -exec ls -lh {} \; 2>/dev/null || echo "فایلی یافت نشد"
+          echo "📊 فایل‌های آماده شده:"
+          find downloads -type f -exec ls -lh {} \; 2>/dev/null | head -20
 
-      - name: بروزرسانی README
+      - name: بروزرسانی README اصلی
         run: |
           {
             echo "# 📥 فایل‌های دانلود شده از BuzzHeavier"
             echo ""
-            echo "## لیست فایل‌ها"
+            echo "## 📊 آمار"
             echo ""
-            if [ -d "downloads" ]; then
-              for folder in downloads/*/; do
-                if [ -d "$folder" ]; then
-                  FOLDER_NAME=$(basename "$folder")
-                  # نمایش فایل‌های موجود در هر پوشه
-                  echo "### 📁 $FOLDER_NAME"
-                  for file in "$folder"/*; do
-                    if [ -f "$file" ]; then
-                      FILENAME=$(basename "$file")
-                      SIZE=$(du -h "$file" | cut -f1)
-                      echo "- 📄 \`$FILENAME\` ($SIZE)"
-                    fi
-                  done
-                  echo ""
-                fi
-              done
-            fi
+            echo "- **تعداد فایل‌ها**: $(find downloads -type f -name '*.zip' -o -name '*.z*' | wc -l) بخش"
+            echo "- **تاریخ**: $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "- **منبع**: BuzzHeavier via Download URL Generator"
+            echo ""
+            echo "## 📁 لیست فایل‌ها"
+            echo ""
+            
+            for folder in downloads/*/; do
+              if [ -d "$folder" ]; then
+                FOLDER_NAME=$(basename "$folder")
+                echo "### 📦 $FOLDER_NAME"
+                echo ""
+                for file in "$folder"/*; do
+                  if [ -f "$file" ]; then
+                    FILENAME=$(basename "$file")
+                    SIZE=$(du -h "$file" | cut -f1)
+                    echo "- 📄 \`$FILENAME\` ($SIZE)"
+                  fi
+                done
+                echo ""
+              fi
+            done
+            
             echo "---"
-            echo "📅 آخرین بروزرسانی: $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "🔧 **ابزار استفاده شده**: [Download URL Generator](https://github.com/Ryas-Yusenda/Download-URL-Generator)"
           } > "downloads/README.md"
-
-      - name: آپلود در گیتهاب
-        run: |
-          echo "📤 شروع آپلود فایل‌ها..."
           
+          echo "✅ README بروزرسانی شد"
+
+      - name: آپلود نهایی در گیتهاب
+        run: |
+          echo "📤 شروع آپلود..."
+          
+          # اضافه کردن فایل‌ها
           git add -f downloads/ 2>/dev/null || true
           git add README.md 2>/dev/null || true
           
-          if ! git diff --cached --quiet 2>/dev/null; then
-            git commit -m "📥 آپلود فایل‌های BuzzHeavier [skip ci]"
-            
-            for i in {1..5}; do
-              echo "🔄 تلاش $i برای push..."
-              if timeout 300 git push origin "${GITHUB_REF_NAME}" 2>&1; then
-                echo "✅ آپلود موفقیت‌آمیز بود"
-                
-                # نمایش لینک‌های دانلود
-                REPO_URL="${{ github.server_url }}/${{ github.repository }}"
-                echo ""
-                echo "🔗 لینک‌های دانلود:"
-                echo "$REPO_URL/tree/${{ github.ref_name }}/downloads"
-                
-                exit 0
-              fi
-              echo "⚠️ تلاش $i ناموفق بود، انتظار 10 ثانیه..."
-              sleep 10
-            done
-            echo "❌ خطا در آپلود پس از 5 تلاش"
+          if git diff --cached --quiet 2>/dev/null; then
+            echo "ℹ️ تغییری برای commit وجود ندارد"
+            exit 0
+          fi
+          
+          git commit -m "📥 آپلود فایل‌های BuzzHeavier [skip ci]"
+          
+          # تلاش برای push
+          SUCCESS=false
+          for i in {1..5}; do
+            echo "🔄 تلاش $i برای push..."
+            if timeout 300 git push origin "${GITHUB_REF_NAME}" 2>&1; then
+              SUCCESS=true
+              echo "✅ آپلود موفقیت‌آمیز بود!"
+              break
+            fi
+            echo "⚠️ تلاش $i ناموفق - انتظار 15 ثانیه..."
+            sleep 15
+            git pull --rebase origin "${GITHUB_REF_NAME}" 2>/dev/null || true
+          done
+          
+          if [ "$SUCCESS" = true ]; then
+            echo ""
+            echo "🎉 عملیات با موفقیت به پایان رسید!"
+            echo "🔗 لینک دانلود:"
+            echo "${{ github.server_url }}/${{ github.repository }}/tree/${{ github.ref_name }}/downloads"
           else
-            echo "ℹ️ فایلی برای آپلود وجود ندارد"
+            echo "❌ خطا در آپلود"
+            exit 1
           fi
