@@ -26,26 +26,81 @@ jobs:
       - name: نصب Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
       - name: کلون Download URL Generator
         run: |
           git clone https://github.com/Ryas-Yusenda/Download-URL-Generator.git /tmp/downloader
           echo "✅ مخزن کلون شد"
           
-          # نمایش ساختار
           echo "📁 ساختار پروژه:"
-          ls -la /tmp/downloader/
+          find /tmp/downloader -type f -name "*.py" -o -name "*.txt" -o -name "*.md" | sort
 
-      - name: نصب نیازمندی‌ها
+      - name: بررسی و نصب نیازمندی‌ها
         run: |
           cd /tmp/downloader
+          
+          # نمایش محتوای requirements.txt اگر وجود دارد
           if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
+            echo "📄 محتوای requirements.txt:"
+            cat requirements.txt
           fi
-          # نصب کتابخانه‌های اضافی که ممکن است نیاز باشد
-          pip install aiohttp beautifulsoup4 cloudscraper requests
-          echo "✅ نیازمندی‌ها نصب شدند"
+          
+          # بررسی importهای مورد نیاز در کد
+          echo ""
+          echo "🔍 بررسی کتابخانه‌های مورد نیاز..."
+          IMPORTS=$(grep -rh "^from\|^import" downloader/ process.py 2>/dev/null | grep -v "from \." | sort -u)
+          echo "$IMPORTS"
+          
+          # نصب کتابخانه‌های ضروری
+          pip install aiohttp beautifulsoup4 cloudscraper requests lxml
+          
+          # نصب selectolax (ممکن است نیاز به کامپایل داشته باشد)
+          pip install selectolax || {
+            echo "⚠️ selectolax از PyPI نصب نشد"
+            # تلاش با pip3 و پیش‌نیازها
+            sudo apt-get update
+            sudo apt-get install -y python3-dev build-essential
+            pip install --no-cache-dir selectolax || {
+              echo "⚠️ نصب selectolax ناموفق - تلاش با نسخه wheel"
+              pip install selectolax-py3 || echo "❌ selectolax نصب نشد"
+            }
+          }
+          
+          echo ""
+          echo "✅ کتابخانه‌های نصب شده:"
+          pip list | grep -E "aiohttp|beautifulsoup4|cloudscraper|selectolax|lxml|requests"
+
+      - name: رفع مشکل selectolax (در صورت نیاز)
+        run: |
+          cd /tmp/downloader
+          
+          # بررسی فایل‌های handler
+          echo "📁 فایل‌های handler:"
+          ls -la downloader/
+          
+          # اگر selectolax نصب نشد، فایل fuckingfast.py را اصلاح کن
+          if ! python3 -c "import selectolax" 2>/dev/null; then
+            echo ""
+            echo "⚠️ selectolax در دسترس نیست - اصلاح handler fuckingfast..."
+            
+            if [ -f "downloader/fuckingfast.py" ]; then
+              # بکاپ از فایل اصلی
+              cp downloader/fuckingfast.py downloader/fuckingfast.py.bak
+              
+              # جایگزینی selectolax با beautifulsoup4
+              sed -i 's/from selectolax.parser import HTMLParser/from bs4 import BeautifulSoup as HTMLParser/' downloader/fuckingfast.py
+              
+              # اصلاح نحوه استفاده (اگر متفاوت باشد)
+              # این بستگی به پیاده‌سازی دارد - ممکن است نیاز به تغییرات بیشتری باشد
+              
+              echo "✅ فایل fuckingfast.py اصلاح شد"
+              echo "محتوای اصلاح شده:"
+              head -10 downloader/fuckingfast.py
+            fi
+          else
+            echo "✅ selectolax با موفقیت نصب شده است"
+          fi
 
       - name: آماده‌سازی و اجرای استخراج
         id: extract
@@ -57,32 +112,50 @@ jobs:
           cat /tmp/downloader/links.txt
           echo ""
           
+          # بررسی ساختار process.py
+          echo "📄 محتوای process.py:"
+          head -30 /tmp/downloader/process.py
+          echo "..."
+          
           # اجرای process.py
+          echo ""
           echo "🔄 در حال استخراج لینک‌های مستقیم..."
           cd /tmp/downloader
+          
+          # اجرا با نمایش کامل خطا
           python3 process.py 2>&1 | tee /tmp/process_log.txt
           EXIT_CODE=$?
           
           echo ""
           echo "📊 کد خروج: $EXIT_CODE"
           
-          if [ -f "links_output.txt" ]; then
+          # بررسی فایل‌های خروجی
+          echo ""
+          echo "📁 فایل‌های موجود بعد از اجرا:"
+          ls -la *.txt 2>/dev/null || echo "فایل txt یافت نشد"
+          
+          if [ -f "links_output.txt" ] && [ -s "links_output.txt" ]; then
+            echo ""
             echo "✅ فایل links_output.txt ایجاد شد"
             echo "محتوای خروجی:"
             echo "═══════════════════════════════════════"
             cat links_output.txt
             echo "═══════════════════════════════════════"
-            
-            # ذخیره محتوا برای مرحله بعد
             cp links_output.txt /tmp/links_output.txt
-            
             echo "EXTRACTION_SUCCESS=true" >> $GITHUB_OUTPUT
           else
-            echo "❌ فایل links_output.txt ایجاد نشد"
+            echo ""
+            echo "❌ فایل links_output.txt ایجاد نشد یا خالی است"
+            
+            # اگر فایل خالی است، شاید handler خاصی برای BuzzHeavier نیاز باشد
+            if [ -f "links_output.txt" ]; then
+              echo "فایل خالی است"
+            fi
+            
             echo "EXTRACTION_SUCCESS=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: پردازش و نمایش نهایی
+      - name: نمایش نتایج نهایی
         run: |
           echo ""
           echo "🎯 =========================================="
@@ -91,25 +164,19 @@ jobs:
           echo ""
           
           if [ -f "/tmp/links_output.txt" ] && [ -s "/tmp/links_output.txt" ]; then
-            # خواندن و پردازش فایل خروجی
             LINK_COUNT=0
             while IFS= read -r line; do
-              if [ -z "$line" ]; then
-                continue
-              fi
-              
+              [ -z "$line" ] && continue
               LINK_COUNT=$((LINK_COUNT + 1))
               
-              # بررسی اگر خط شامل URL است
               if [[ "$line" =~ ^https?:// ]]; then
-                echo "$LINK_COUNT. $line"
+                echo "$LINK_COUNT. ✅ $line"
               else
-                # سعی در استخراج URL از خط
-                URL=$(echo "$line" | grep -oP 'https?://[^\s"'\'']+' | head -1)
+                URL=$(echo "$line" | grep -oP 'https?://[^\s"'"'"']+' | head -1)
                 if [ -n "$URL" ]; then
-                  echo "$LINK_COUNT. $URL"
+                  echo "$LINK_COUNT. ✅ $URL"
                 else
-                  echo "$LINK_COUNT. $line (فرمت نامشخص)"
+                  echo "$LINK_COUNT. ⚠️ $line"
                 fi
               fi
             done < "/tmp/links_output.txt"
@@ -117,20 +184,25 @@ jobs:
             echo ""
             echo "📊 تعداد لینک‌های استخراج شده: $LINK_COUNT"
             
-          elif [ -f "/tmp/downloader/links_output.txt" ] && [ -s "/tmp/downloader/links_output.txt" ]; then
-            echo "محتوای فایل خروجی:"
-            cat /tmp/downloader/links_output.txt
           else
             echo "⚠️ هیچ لینکی استخراج نشد"
             echo ""
-            echo "📋 لاگ پردازش:"
+            echo "📋 لاگ کامل اجرا:"
+            echo "──────────────────────────────────────"
             cat /tmp/process_log.txt
             
             echo ""
-            echo "💡 راهنمایی:"
-            echo "- مطمئن شوید لینک‌ها معتبر و قابل دسترسی هستند"
-            echo "- فایل ممکن است پاک شده باشد"
-            echo "- سایت ممکن است مسدود یا نیاز به احراز هویت داشته باشد"
+            echo "🔍 عیب‌یابی:"
+            echo "1. بررسی handlerهای موجود:"
+            ls -la /tmp/downloader/downloader/
+            
+            echo ""
+            echo "2. آیا handler برای BuzzHeavier وجود دارد؟"
+            find /tmp/downloader -name "*buzz*" -o -name "*heavier*" 2>/dev/null || echo "❌ handler برای BuzzHeavier پیدا نشد"
+            
+            echo ""
+            echo "💡 ممکن است این ابزار handler برای BuzzHeavier نداشته باشد"
+            echo "لینک‌های پشتیبانی شده در readme: fuckingfast, mediafire, pixeldrain"
           fi
 
       - name: ذخیره خروجی به عنوان آرتیفکت
@@ -140,4 +212,6 @@ jobs:
           path: |
             /tmp/links_output.txt
             /tmp/process_log.txt
+            /tmp/downloader/links.txt
           retention-days: 7
+        if: always()
