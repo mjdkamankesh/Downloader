@@ -1,0 +1,43 @@
+name: Download eFootball APK from APKMirror
+
+# فقط اجرای دستی
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'نسخه مورد نظر (خالی بگذارید برای آخرین نسخه)'
+        required: false
+        default: ''
+      arch:
+        description: 'معماری (arm64-v8a, armeabi-v7a, universal)'
+        required: false
+        default: 'arm64-v8a'
+      dpi:
+        description: 'DPI صفحه نمایش (nodpi, 120dpi, 240dpi, 320dpi, 480dpi, 640dpi)'
+        required: false
+        default: 'nodpi'
+
+jobs:
+  download-efootball:
+    runs-on: ubuntu-latest
+    name: Download eFootball APK
+    
+    steps:
+      - name: Download eFootball APK from APKMirror
+        id: download
+        uses: Yakov5776/gh-apkmirror-dl@v1.3
+        with:
+          org: "konami"
+          repo: "pes2017-pro-evolution-soccer"
+          version: ${{ github.event.inputs.version }}
+          arch: ${{ github.event.inputs.arch }}
+          dpi: ${{ github.event.inputs.dpi }}
+          bundle: false
+          filename: "efootball.apk"
+      
+      - name: Upload APK as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: efootball-apk
+          path: ${{ steps.download.outputs.filename }}
+          retention-days: 30
