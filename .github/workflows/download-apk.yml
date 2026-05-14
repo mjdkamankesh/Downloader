@@ -1,89 +1,34 @@
-name: Download eFootball 10.4.2 with APKMD (Linux)
+name: Download with yt-dlp
 
 on:
   workflow_dispatch:
 
 jobs:
-  download-efootball:
+  yt-dlp-download:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
+    
     steps:
-      # مرحله 1: دانلود فایل apkmd مخصوص لینوکس از ریلیز اصلی
-      - name: Download APKMD Linux executable
+      - name: Install yt-dlp
         run: |
-          echo "Downloading apkmd from official release..."
-          wget -O apkmd https://github.com/tanishqmanuja/apkmirror-downloader/releases/download/v2.0.10/apkmd
+          sudo apt-get update
+          sudo apt-get install -y python3-pip
+          pip3 install yt-dlp
           
-          # بررسی دانلود موفق
-          if [ -f "apkmd" ]; then
-            echo "✅ apkmd downloaded successfully"
-            ls -lh apkmd
-          else
-            echo "❌ Download failed"
-            exit 1
+      - name: Download eFootball
+        run: |
+          yt-dlp -f best --no-playlist \
+            "https://www.apkmirror.com/apk/konami/pes2017-pro-evolution-soccer/efootball-10-4-2-release/" \
+            -o "efootball.%(ext)s"
+          
+      - name: Check and upload
+        run: |
+          find . -name "*.apk" -type f
+          if [ -f "efootball.apk" ]; then
+            ls -lh efootball.apk
           fi
           
-          # اجرایی کردن فایل
-          chmod +x apkmd
-          echo "✅ Made apkmd executable"
-
-      # مرحله 2: ساخت فایل کانفیگ (مطابق با کانفیگ شما)
-      - name: Create config file (apps.json)
-        run: |
-          cat > apps.json << 'EOF'
-          {
-            "options": {
-              "arch": "arm64-v8a",
-              "outDir": "downloads"
-            },
-            "apps": [
-              {
-                "org": "konami",
-                "repo": "pes2017-pro-evolution-soccer",
-                "outFile": "efootball",
-                "version": "10.4.2"
-              }
-            ]
-          }
-          EOF
-          
-          echo "✅ Config file created:"
-          cat apps.json
-
-      # مرحله 3: اجرای دانلود
-      - name: Download eFootball APK
-        run: |
-          echo "Starting download of eFootball 10.4.2..."
-          ./apkmd apps.json
-          
-          # کمی صبر برای اطمینان از اتمام دانلود و نوشتن فایل
-          sleep 3
-
-      # مرحله 4: پیدا کردن و تأیید فایل APK دانلود شده
-      - name: Verify and locate APK
-        run: |
-          echo "Searching for downloaded APK file..."
-          
-          # جستجوی فایل efootball.apk در دایرکتوری دانلود
-          if [ -f "downloads/efootball.apk" ]; then
-            SIZE=$(stat -c%s "downloads/efootball.apk")
-            SIZE_MB=$((SIZE / 1024 / 1024))
-            echo "✅ eFootball 10.4.2 downloaded successfully!"
-            echo "📁 File: downloads/efootball.apk"
-            echo "📊 Size: ${SIZE_MB} MB"
-            ls -lh downloads/
-          else
-            echo "❌ APK not found in 'downloads' directory!"
-            echo "Trying to find any .apk file in the workspace..."
-            find . -name "*.apk" -type f
-            exit 1
-          fi
-
-      # مرحله 5: آپلود فایل APK به عنوان Artifact
-      - name: Upload APK as Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: efootall-10.4.2-apk
-          path: downloads/efootball.apk
-          retention-days: 30
+          name: efootball-10.4.2
+          path: "*.apk"
