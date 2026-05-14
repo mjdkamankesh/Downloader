@@ -1,169 +1,301 @@
-name: 🔗 استخراج لینک مستقیم با Download URL Generator
+name: ⬇️ دانلود از BuzzHeavier
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: '🔗 لینک‌ها (با فاصله یا خط جدید جدا کنید)'
+        description: '🔗 لینک‌های BuzzHeavier (با فاصله جدا کنید)'
         required: true
+        type: string
+      server:
+        description: '🖥️ انتخاب سرور دانلود'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - 'all'
+      mode:
+        description: '📦 حالت ذخیره‌سازی'
+        required: false
+        default: 'single'
+        type: choice
+        options:
+          - single
+          - zip
+      password:
+        description: '🔒 رمز عبور برای فایل zip (اختیاری)'
+        required: false
+        default: ''
         type: string
 
 jobs:
-  extract-links:
+  download:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 120
+    permissions:
+      contents: write
     
     steps:
-      - name: نمایش لینک‌های ورودی
+      - name: بررسی ورودی
         run: |
-          echo "📋 لینک‌های ورودی:"
-          echo "${{ github.event.inputs.urls }}"
-          echo ""
+          if [ -z "${{ github.event.inputs.urls }}" ]; then
+            echo "❌ لینکی وارد نشده است"
+            exit 1
+          fi
+          echo "✅ ورودی دریافت شد"
 
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: نصب Python و پیش‌نیازهای سیستمی
-        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
-      - name: نصب پیش‌نیازهای کامپایل
+      - name: نصب پیش‌نیازها
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-dev build-essential
-          echo "✅ پیش‌نیازهای کامپایل نصب شدند"
+          sudo apt-get install -y aria2 zip curl
+          pip3 install requests beautifulsoup4
+          echo "✅ پیش‌نیازها نصب شد"
 
-      - name: کلون Download URL Generator
+      - name: ایجاد اسکریپت استخراج لینک
         run: |
-          git clone https://github.com/Ryas-Yusenda/Download-URL-Generator.git /tmp/downloader
-          echo "✅ مخزن کلون شد"
+          cat > /tmp/bh_extractor.py << 'PYEOF'
+          import re
+          import sys
+          import requests
+          from bs4 import BeautifulSoup
+          from urllib.parse import urljoin, unquote
 
-      - name: نصب نیازمندی‌های پروژه
-        run: |
-          cd /tmp/downloader
-          
-          echo "📄 فایل requirements.txt:"
-          if [ -f "requirements.txt" ]; then
-            cat requirements.txt
-          else
-            echo "فایل requirements.txt وجود ندارد"
-          fi
-          
-          echo ""
-          echo "📦 نصب کتابخانه‌های مورد نیاز..."
-          
-          # نصب selectolax با روش صحیح
-          pip install selectolax
-          
-          # نصب سایر نیازمندی‌ها
-          pip install aiohttp beautifulsoup4 cloudscraper requests lxml
-          
-          echo ""
-          echo "✅ کتابخانه‌های نصب شده:"
-          pip list | grep -E "selectolax|aiohttp|beautifulsoup4|cloudscraper|lxml"
+          def extract_download_links(url):
+              headers = {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              }
+              
+              try:
+                  response = requests.get(url, headers=headers, timeout=30)
+                  response.raise_for_status()
+                  
+                  soup = BeautifulSoup(response.text, 'html.parser')
+                  
+                  # نام فایل
+                  title_tag = soup.find('title')
+                  filename = title_tag.text.strip() if title_tag else None
+                  
+                  # لینک‌های دانلود
+                  download_links = []
+                  for a_tag in soup.find_all('a', href=True):
+                      hx_get = a_tag.get('hx-get', '')
+                      href = a_tag.get('href', '')
+                      link = hx_get or href
+                      
+                      if link and '/download?' in link:
+                          full_url = urljoin(url, link)
+                          text = a_tag.text.strip()
+                          
+                          # تشخیص سرور
+                          if 'Server 1' in text or (not 'Server 2' in text and 'alt=true' not in full_url):
+                              server = '1'
+                          elif 'Server 2' in text or 'alt=true' in full_url:
+                              server = '2'
+                          else:
+                              server = '1'
+                          
+                          download_links.append({
+                              'url': full_url,
+                              'server': server
+                          })
+                  
+                  return {
+                      'filename': filename,
+                      'downloads': download_links
+                  }
+              
+              except Exception as e:
+                  print(f"ERROR:{e}", file=sys.stderr)
+                  return None
 
-      - name: بررسی آمادگی پروژه
-        run: |
-          cd /tmp/downloader
-          
-          echo "🔍 تست import کتابخانه‌ها:"
-          python3 -c "
-          try:
-              import selectolax
-              print('✅ selectolax')
-          except ImportError as e:
-              print(f'❌ selectolax: {e}')
-          
-          try:
-              import aiohttp
-              print('✅ aiohttp')
-          except ImportError as e:
-              print(f'❌ aiohttp: {e}')
-          
-          try:
-              from bs4 import BeautifulSoup
-              print('✅ beautifulsoup4')
-          except ImportError as e:
-              print(f'❌ beautifulsoup4: {e}')
-          "
-          
-          echo ""
-          echo "📁 handlerهای موجود:"
-          ls -la /tmp/downloader/downloader/
+          if __name__ == "__main__":
+              if len(sys.argv) < 2:
+                  print("ERROR: No URL provided")
+                  sys.exit(1)
+              
+              url = sys.argv[1]
+              result = extract_download_links(url)
+              
+              if result and result['downloads']:
+                  print(f"FILENAME:{result['filename']}")
+                  for dl in result['downloads']:
+                      print(f"DOWNLOAD_URL:{dl['url']}")
+                      print(f"SERVER:{dl['server']}")
+              else:
+                  print("ERROR: No download links found")
+                  sys.exit(1)
+          PYEOF
 
-      - name: اجرای استخراج لینک
-        id: extract
+      - name: استخراج و دانلود
         run: |
-          # ایجاد فایل links.txt
-          echo "${{ github.event.inputs.urls }}" | tr ' ' '\n' | sed '/^$/d' > /tmp/downloader/links.txt
+          URLS="${{ github.event.inputs.urls }}"
+          SERVER_CHOICE="${{ github.event.inputs.server }}"
+          MODE="${{ github.event.inputs.mode }}"
+          ZIP_PASSWORD="${{ github.event.inputs.password }}"
           
-          echo "📝 لینک‌های ورودی:"
-          cat /tmp/downloader/links.txt
-          echo ""
+          SPLIT_SIZE=45  # MB
           
-          # اجرای process.py
-          echo "🔄 در حال استخراج لینک‌های مستقیم..."
-          cd /tmp/downloader
-          python3 process.py 2>&1 | tee /tmp/process_log.txt
+          BACKUP_DIR="/tmp/dl_$$"
+          mkdir -p "$BACKUP_DIR" downloads tmp_downloads
           
-          echo ""
-          echo "📊 نتیجه:"
-          
-          if [ -f "links_output.txt" ] && [ -s "links_output.txt" ]; then
-            echo "✅ استخراج موفقیت‌آمیز بود!"
-            echo ""
-            echo "🎯 لینک‌های مستقیم:"
-            echo "═══════════════════════════════════════"
-            cat links_output.txt
-            echo "═══════════════════════════════════════"
-            cp links_output.txt /tmp/links_output.txt
-          else
-            echo "❌ استخراج ناموفق بود"
+          for URL in $URLS; do
+            echo "🔍 پردازش: $URL"
             
-            if [ -f "links_output.txt" ]; then
-              echo "فایل links_output.txt خالی است"
+            # استخراج لینک دانلود
+            OUTPUT=$(python3 /tmp/bh_extractor.py "$URL" 2>/tmp/bh_error.log)
+            
+            FILENAME=$(echo "$OUTPUT" | grep "^FILENAME:" | cut -d':' -f2-)
+            echo "📁 فایل: $FILENAME"
+            
+            # انتخاب لینک دانلود بر اساس سرور
+            if [ "$SERVER_CHOICE" = "all" ]; then
+              # دانلود از همه سرورها
+              DOWNLOAD_URLS=$(echo "$OUTPUT" | grep "^DOWNLOAD_URL:" | cut -d':' -f2-)
+            else
+              # دانلود از سرور انتخاب شده
+              DOWNLOAD_URLS=$(echo "$OUTPUT" | grep "^DOWNLOAD_URL:" | grep -A1 "SERVER:$SERVER_CHOICE" | grep "^DOWNLOAD_URL:" | cut -d':' -f2-)
+              
+              # اگر سرور مورد نظر نبود، سرور 1 را انتخاب کن
+              if [ -z "$DOWNLOAD_URLS" ]; then
+                DOWNLOAD_URLS=$(echo "$OUTPUT" | grep "^DOWNLOAD_URL:" | head -1 | cut -d':' -f2-)
+              fi
             fi
             
-            echo ""
-            echo "📋 لاگ خطاها:"
-            grep -i "error\|exception\|traceback" /tmp/process_log.txt || echo "خطای خاصی یافت نشد"
-          fi
-
-      - name: نمایش نتایج نهایی
-        run: |
-          echo ""
-          echo "🎯 =========================================="
-          echo "🎯     لینک‌های مستقیم استخراج شده"
-          echo "🎯 =========================================="
-          echo ""
+            # دانلود فایل‌ها
+            DL_COUNT=0
+            for DL_URL in $DOWNLOAD_URLS; do
+              DL_COUNT=$((DL_COUNT + 1))
+              
+              # نام فایل برای ذخیره
+              if [ "$SERVER_CHOICE" = "all" ] && [ $DL_COUNT -gt 1 ]; then
+                SAVE_NAME="server${DL_COUNT}_${FILENAME}"
+              else
+                SAVE_NAME="$FILENAME"
+              fi
+              
+              echo "⏬ دانلود [$DL_COUNT]: $SAVE_NAME"
+              
+              # دانلود با aria2
+              aria2c \
+                --split=8 \
+                --max-connection-per-server=8 \
+                --min-split-size=20M \
+                --max-tries=5 \
+                --retry-wait=5 \
+                --timeout=120 \
+                --connect-timeout=30 \
+                --allow-overwrite=true \
+                --auto-file-renaming=false \
+                --dir="tmp_downloads" \
+                --out="$SAVE_NAME" \
+                "$DL_URL" 2>&1 || {
+                  echo "⚠️ aria2 ناموفق - استفاده از curl"
+                  curl -L -# \
+                    --retry 3 \
+                    --retry-delay 5 \
+                    --connect-timeout 30 \
+                    --max-time 7200 \
+                    -A "Mozilla/5.0" \
+                    -o "tmp_downloads/$SAVE_NAME" \
+                    "$DL_URL" || echo "❌ دانلود ناموفق: $SAVE_NAME"
+                }
+            done
+          done
           
-          if [ -f "/tmp/links_output.txt" ] && [ -s "/tmp/links_output.txt" ]; then
-            LINK_COUNT=0
-            while IFS= read -r line; do
-              [ -z "$line" ] && continue
-              LINK_COUNT=$((LINK_COUNT + 1))
-              echo "$LINK_COUNT. $line"
-            done < "/tmp/links_output.txt"
+          # پردازش و بسته‌بندی
+          echo "📦 بسته‌بندی فایل‌ها..."
+          
+          if [ "$MODE" = "zip" ]; then
+            ARCHIVE_NAME="buzzheavier_$(date +%Y%m%d_%H%M%S)"
+            mkdir -p "$BACKUP_DIR/$ARCHIVE_NAME"
             
-            echo ""
-            echo "📊 تعداد لینک‌ها: $LINK_COUNT"
-            echo ""
-            echo "✅ می‌توانید از این لینک‌ها برای دانلود مستقیم استفاده کنید"
+            if [ -n "$ZIP_PASSWORD" ]; then
+              zip -j -P "$ZIP_PASSWORD" -s ${SPLIT_SIZE}m \
+                "$BACKUP_DIR/$ARCHIVE_NAME/${ARCHIVE_NAME}.zip" \
+                tmp_downloads/*
+            else
+              zip -j -s ${SPLIT_SIZE}m \
+                "$BACKUP_DIR/$ARCHIVE_NAME/${ARCHIVE_NAME}.zip" \
+                tmp_downloads/*
+            fi
             
+            # README
+            echo "# $ARCHIVE_NAME" > "$BACKUP_DIR/$ARCHIVE_NAME/README.md"
+            echo "" >> "$BACKUP_DIR/$ARCHIVE_NAME/README.md"
+            echo "| فایل | حجم |" >> "$BACKUP_DIR/$ARCHIVE_NAME/README.md"
+            echo "|------|------|" >> "$BACKUP_DIR/$ARCHIVE_NAME/README.md"
+            for f in tmp_downloads/*; do
+              [ -f "$f" ] || continue
+              SIZE=$(du -h "$f" | cut -f1)
+              echo "| $(basename "$f") | $SIZE |" >> "$BACKUP_DIR/$ARCHIVE_NAME/README.md"
+            done
           else
-            echo "❌ لینکی استخراج نشد"
-            echo ""
-            echo "📋 لاگ پردازش:"
-            cat /tmp/process_log.txt
+            for FILE in tmp_downloads/*; do
+              [ -f "$FILE" ] || continue
+              
+              BASENAME=$(basename "$FILE")
+              SIZE=$(stat -c%s "$FILE")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              FOLDER="${BASENAME%.*}_$(date +%s)"
+              mkdir -p "$BACKUP_DIR/$FOLDER"
+              
+              if [ "$SIZE" -gt $((SPLIT_SIZE * 1024 * 1024)) ]; then
+                if [ -n "$ZIP_PASSWORD" ]; then
+                  zip -j -P "$ZIP_PASSWORD" -s ${SPLIT_SIZE}m \
+                    "$BACKUP_DIR/$FOLDER/${FOLDER}.zip" "$FILE"
+                else
+                  zip -j -s ${SPLIT_SIZE}m \
+                    "$BACKUP_DIR/$FOLDER/${FOLDER}.zip" "$FILE"
+                fi
+              else
+                if [ -n "$ZIP_PASSWORD" ]; then
+                  zip -j -P "$ZIP_PASSWORD" \
+                    "$BACKUP_DIR/$FOLDER/${FOLDER}.zip" "$FILE"
+                else
+                  zip -j "$BACKUP_DIR/$FOLDER/${FOLDER}.zip" "$FILE"
+                fi
+              fi
+              
+              echo "# $BASENAME" > "$BACKUP_DIR/$FOLDER/README.md"
+              echo "**حجم:** ${SIZE_MB}MB" >> "$BACKUP_DIR/$FOLDER/README.md"
+            done
           fi
+          
+          # کپی به downloads
+          cp -r "$BACKUP_DIR"/* downloads/ 2>/dev/null
+          
+          echo "✅ عملیات کامل شد"
 
-      - name: ذخیره خروجی
-        uses: actions/upload-artifact@v4
-        with:
-          name: direct-links
-          path: |
-            /tmp/links_output.txt
-            /tmp/process_log.txt
-          retention-days: 7
-        if: always()
+      - name: آپلود در گیتهاب
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          
+          git add -f downloads/ 2>/dev/null
+          
+          if git diff --cached --quiet 2>/dev/null; then
+            echo "ℹ️ فایلی برای آپلود نیست"
+            exit 0
+          fi
+          
+          git commit -m "📥 دانلود از BuzzHeavier [skip ci]"
+          
+          for i in {1..5}; do
+            if git push origin "${GITHUB_REF_NAME}" 2>&1; then
+              echo "✅ آپلود موفق"
+              exit 0
+            fi
+            echo "🔄 تلاش $i ناموفق - 10 ثانیه صبر..."
+            sleep 10
+          done
+          
+          echo "❌ آپلود ناموفق"
