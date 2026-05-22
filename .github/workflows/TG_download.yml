@@ -1,4 +1,4 @@
-name: 📥 Telegram Chat Downloader (Debug Mode)
+name: 📥 Telegram Chat Downloader (Fixed)
 
 on:
   workflow_dispatch:
@@ -32,34 +32,27 @@ jobs:
       contents: write
 
     steps:
-      - name: ✅ Step 1 - Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: ✅ Step 2 - Configure Git
+      - name: Configure Git
         run: |
-          echo "=== Configuring Git ==="
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
-          echo "Git configured successfully"
 
-      - name: ✅ Step 3 - Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: ✅ Step 4 - Install Telethon
-        run: |
-          echo "=== Installing Telethon ==="
-          pip install telethon
-          echo "Telethon installed, checking version..."
-          python -c "import telethon; print(f'Telethon version: {telethon.__version__}')"
+      - name: Install dependencies
+        run: pip install telethon
 
-      - name: ✅ Step 5 - Create download script
+      - name: Create download script
         run: |
-          echo "=== Creating download script ==="
           cat > download_chat.py << 'EOF'
           import os
           import sys
@@ -72,23 +65,41 @@ jobs:
           print("=== SCRIPT STARTED ===")
           print(f"Python version: {sys.version}")
 
-          # خواندن متغیرهای محیطی
-          API_ID = int(os.environ.get('API_ID', 0))
-          API_HASH = os.environ.get('API_HASH', '')
-          STRING_SESSION = os.environ.get('STRING_SESSION', '')
-          CHAT_TARGET = os.environ.get('CHAT_TARGET', '')
-          START_ID = int(os.environ.get('START_ID', '0'))
-          END_ID_STR = os.environ.get('END_ID', '')
-          END_ID = int(END_ID_STR) if END_ID_STR and END_ID_STR.strip() else None
+          # خواندن متغیرهای محیطی - بدون استفاده از int() روی مقدار مخفی شده
+          api_id_str = os.environ.get('API_ID', '')
+          api_hash = os.environ.get('API_HASH', '')
+          string_session = os.environ.get('STRING_SESSION', '')
+          chat_target = os.environ.get('CHAT_TARGET', '')
+          start_id_str = os.environ.get('START_ID', '0')
+          end_id_str = os.environ.get('END_ID', '')
+
+          # تبدیل به عدد
+          try:
+              API_ID = int(api_id_str) if api_id_str else 0
+          except ValueError:
+              print(f"❌ ERROR: Invalid API_ID: {api_id_str}")
+              sys.exit(1)
+
+          try:
+              START_ID = int(start_id_str) if start_id_str else 0
+          except ValueError:
+              START_ID = 0
+
+          END_ID = None
+          if end_id_str and end_id_str.strip():
+              try:
+                  END_ID = int(end_id_str)
+              except ValueError:
+                  END_ID = None
 
           print(f"API_ID: {'SET' if API_ID else 'MISSING'}")
-          print(f"API_HASH: {'SET' if API_HASH else 'MISSING'}")
-          print(f"STRING_SESSION: {'SET' if STRING_SESSION else 'MISSING'}")
-          print(f"CHAT_TARGET: {CHAT_TARGET}")
+          print(f"API_HASH: {'SET' if api_hash else 'MISSING'}")
+          print(f"STRING_SESSION: {'SET' if string_session else 'MISSING'}")
+          print(f"CHAT_TARGET: {chat_target}")
           print(f"START_ID: {START_ID}")
           print(f"END_ID: {END_ID}")
 
-          if not API_ID or not API_HASH or not STRING_SESSION:
+          if not API_ID or not api_hash or not string_session:
               print("❌ ERROR: Missing required environment variables!")
               print("Please check your GitHub Secrets: TG_API_ID, TG_API_HASH, TG_STRING_SESSION")
               sys.exit(1)
@@ -109,7 +120,7 @@ jobs:
 
           async def main():
               print("=== Connecting to Telegram ===")
-              async with TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH) as client:
+              async with TelegramClient(StringSession(string_session), API_ID, api_hash) as client:
                   print("✓ Client created")
                   
                   try:
@@ -120,12 +131,12 @@ jobs:
                       return
 
                   try:
-                      print(f"Looking for chat: {CHAT_TARGET}")
-                      entity = await client.get_entity(CHAT_TARGET)
+                      print(f"Looking for chat: {chat_target}")
+                      entity = await client.get_entity(chat_target)
                       name = entity.title if hasattr(entity, 'title') else str(entity.id)
                       print(f"✅ Connected to: {name}")
                   except (UsernameNotOccupiedError, ValueError) as e:
-                      print(f"❌ Invalid chat: {CHAT_TARGET} - Error: {e}")
+                      print(f"❌ Invalid chat: {chat_target} - Error: {e}")
                       return
                   except ChannelPrivateError as e:
                       print(f"❌ Cannot access private channel: {e}")
@@ -198,9 +209,9 @@ jobs:
                   traceback.print_exc()
                   sys.exit(1)
           EOF
-          echo "✓ Script created successfully"
+          echo "✓ Script created"
 
-      - name: ✅ Step 6 - Run download script
+      - name: Run download script
         env:
           API_ID: ${{ secrets.TG_API_ID }}
           API_HASH: ${{ secrets.TG_API_HASH }}
@@ -210,21 +221,15 @@ jobs:
           END_ID: ${{ github.event.inputs.end_message_id }}
         run: |
           echo "=== Running download script ==="
-          echo "Checking environment variables:"
-          echo "API_ID: $(echo $API_ID | cut -c1-5)***"
-          echo "API_HASH: $(echo $API_HASH | cut -c1-5)***"
-          echo "STRING_SESSION: $(echo $STRING_SESSION | cut -c1-10)***"
-          echo "CHAT_TARGET: $CHAT_TARGET"
           python download_chat.py
           echo "=== Script finished ==="
 
-      - name: ✅ Step 7 - Zip and split (if files exist)
+      - name: Zip, split & create README
         if: success()
         env:
           ZIP_PASSWORD: ${{ github.event.inputs.zip_password }}
         run: |
-          echo "=== Starting Zip & Split process ==="
-          set -e
+          echo "=== Starting Zip & Split ==="
           BASE_DIR="saved_files"
           SPLIT_THRESHOLD_MB=45
           REPO_OWNER="${{ github.repository_owner }}"
@@ -232,33 +237,24 @@ jobs:
           BRANCH="${GITHUB_REF_NAME}"
 
           if [ ! -d "$BASE_DIR" ]; then
-            echo "No saved_files directory. Nothing to zip."
+            echo "No saved_files directory. Exiting."
             exit 0
           fi
 
           urlencode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"; }
 
-          FOLDER_COUNT=0
           for folder in "$BASE_DIR"/*/ ; do
             [ -d "$folder" ] || continue
             foldername=$(basename "$folder")
-            echo "============================================"
-            echo "📦 Processing folder: $foldername"
-            echo "============================================"
-            FOLDER_COUNT=$((FOLDER_COUNT + 1))
+            echo "Processing folder: $foldername"
 
             cd "$BASE_DIR"
-            echo "Removing old zip files..."
             rm -f "${foldername}.zip" "${foldername}.z"* 2>/dev/null || true
-            echo "Creating zip archive..."
             if [ -n "$ZIP_PASSWORD" ]; then
-              echo "Password protected: YES"
               zip -r -P "$ZIP_PASSWORD" -s ${SPLIT_THRESHOLD_MB}m "${foldername}.zip" "$foldername"
             else
-              echo "Password protected: NO"
               zip -r -s ${SPLIT_THRESHOLD_MB}m "${foldername}.zip" "$foldername"
             fi
-            echo "Removing original folder..."
             rm -rf "$foldername"
             cd ../..
 
@@ -275,30 +271,14 @@ jobs:
               echo "| $link_counter | \`$part_basename\` | [Download]($raw_link) |" >> "$final_readme"
               link_counter=$((link_counter+1))
             done
-            echo "✅ $foldername → $((link_counter-1)) parts created"
+            echo "✅ $foldername → $((link_counter-1)) parts"
           done
-          echo "=== Processed $FOLDER_COUNT folders ==="
 
-      - name: ✅ Step 8 - Commit and push
+      - name: Commit and push
         if: success()
         run: |
-          echo "=== Committing changes ==="
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add saved_files/
-          echo "Files to commit:"
-          git status --short
-          if git diff --quiet && git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Backup from chat $(date -u '+%Y-%m-%d %H:%M:%S')"
-            echo "Pushing to repository..."
-            git push
-            echo "✓ Push completed"
-          fi
-
-      - name: ✅ Final status
-        if: always()
-        run: |
-          echo "=== Workflow finished ==="
-          echo "Status: ${{ job.status }}"
+          git diff --quiet && git diff --staged --quiet || git commit -m "Backup from chat $(date -u '+%Y-%m-%d %H:%M:%S')"
+          git push
