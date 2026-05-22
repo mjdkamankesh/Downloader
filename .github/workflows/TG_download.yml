@@ -1,4 +1,4 @@
-name: 📥 Telegram Chat Downloader (Fixed)
+name: 📥 Telegram Chat Downloader (Fixed - Direct)
 
 on:
   workflow_dispatch:
@@ -51,9 +51,9 @@ jobs:
       - name: Install dependencies
         run: pip install telethon
 
-      - name: Create download script
+      - name: Create download script with secrets embedded
         run: |
-          cat > download_chat.py << 'EOF'
+          cat > download_chat.py << EOF
           import os
           import sys
           import re
@@ -65,43 +65,25 @@ jobs:
           print("=== SCRIPT STARTED ===")
           print(f"Python version: {sys.version}")
 
-          # خواندن متغیرهای محیطی - بدون استفاده از int() روی مقدار مخفی شده
-          api_id_str = os.environ.get('API_ID', '')
-          api_hash = os.environ.get('API_HASH', '')
-          string_session = os.environ.get('STRING_SESSION', '')
-          chat_target = os.environ.get('CHAT_TARGET', '')
-          start_id_str = os.environ.get('START_ID', '0')
-          end_id_str = os.environ.get('END_ID', '')
+          # استفاده مستقیم از Secrets (بدون environment variable)
+          API_ID = ${{ secrets.TG_API_ID }}
+          API_HASH = "${{ secrets.TG_API_HASH }}"
+          STRING_SESSION = "${{ secrets.TG_STRING_SESSION }}"
+          CHAT_TARGET = "${{ github.event.inputs.chat_target }}"
+          START_ID = ${{ github.event.inputs.start_message_id }}
+          END_ID_RAW = "${{ github.event.inputs.end_message_id }}"
 
-          # تبدیل به عدد
-          try:
-              API_ID = int(api_id_str) if api_id_str else 0
-          except ValueError:
-              print(f"❌ ERROR: Invalid API_ID: {api_id_str}")
-              sys.exit(1)
+          print(f"API_ID: {API_ID}")
+          print(f"API_HASH: {'*' * 10}")
+          print(f"STRING_SESSION: {'*' * 10}")
+          print(f"CHAT_TARGET: {CHAT_TARGET}")
 
-          try:
-              START_ID = int(start_id_str) if start_id_str else 0
-          except ValueError:
-              START_ID = 0
+          START_ID = int(START_ID) if START_ID else 0
+          END_ID = int(END_ID_RAW) if END_ID_RAW and END_ID_RAW.strip() else None
 
-          END_ID = None
-          if end_id_str and end_id_str.strip():
-              try:
-                  END_ID = int(end_id_str)
-              except ValueError:
-                  END_ID = None
-
-          print(f"API_ID: {'SET' if API_ID else 'MISSING'}")
-          print(f"API_HASH: {'SET' if api_hash else 'MISSING'}")
-          print(f"STRING_SESSION: {'SET' if string_session else 'MISSING'}")
-          print(f"CHAT_TARGET: {chat_target}")
-          print(f"START_ID: {START_ID}")
-          print(f"END_ID: {END_ID}")
-
-          if not API_ID or not api_hash or not string_session:
-              print("❌ ERROR: Missing required environment variables!")
-              print("Please check your GitHub Secrets: TG_API_ID, TG_API_HASH, TG_STRING_SESSION")
+          if not API_ID or not API_HASH or not STRING_SESSION:
+              print("❌ ERROR: Missing required secrets!")
+              print("Please check your GitHub Secrets")
               sys.exit(1)
 
           BASE_DIR = 'saved_files'
@@ -120,7 +102,7 @@ jobs:
 
           async def main():
               print("=== Connecting to Telegram ===")
-              async with TelegramClient(StringSession(string_session), API_ID, api_hash) as client:
+              async with TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH) as client:
                   print("✓ Client created")
                   
                   try:
@@ -131,18 +113,12 @@ jobs:
                       return
 
                   try:
-                      print(f"Looking for chat: {chat_target}")
-                      entity = await client.get_entity(chat_target)
+                      print(f"Looking for chat: {CHAT_TARGET}")
+                      entity = await client.get_entity(CHAT_TARGET)
                       name = entity.title if hasattr(entity, 'title') else str(entity.id)
                       print(f"✅ Connected to: {name}")
-                  except (UsernameNotOccupiedError, ValueError) as e:
-                      print(f"❌ Invalid chat: {chat_target} - Error: {e}")
-                      return
-                  except ChannelPrivateError as e:
-                      print(f"❌ Cannot access private channel: {e}")
-                      return
                   except Exception as e:
-                      print(f"❌ Unexpected error getting entity: {e}")
+                      print(f"❌ Error getting entity: {e}")
                       return
 
                   os.makedirs(BASE_DIR, exist_ok=True)
@@ -151,14 +127,13 @@ jobs:
                   total_messages = 0
 
                   min_id = START_ID if START_ID > 0 else 0
-                  max_id = END_ID if END_ID else 0
-                  print(f"Message range: min_id={min_id}, max_id={max_id if max_id else 'unlimited'}")
+                  print(f"Starting from message ID: {min_id}")
 
                   try:
-                      async for msg in client.iter_messages(entity, min_id=min_id, max_id=max_id, reverse=True):
+                      async for msg in client.iter_messages(entity, min_id=min_id, max_id=END_ID, reverse=True):
                           total_messages += 1
-                          if total_messages % 100 == 0:
-                              print(f"📊 Processed {total_messages} messages so far...")
+                          if total_messages % 50 == 0:
+                              print(f"📊 Processed {total_messages} messages...")
                           
                           if END_ID and msg.id > END_ID:
                               break
@@ -192,13 +167,13 @@ jobs:
                               except Exception as e:
                                   print(f"❌ msg {msg.id}: {e}")
                           else:
-                              print(f"⏩ {path} exists (already downloaded)")
+                              print(f"⏩ Already exists: {fname}")
 
                   except Exception as e:
-                      print(f"❌ Error during message iteration: {e}")
+                      print(f"❌ Error during iteration: {e}")
                       return
 
-                  print(f"\n🎉 Done! Total messages checked: {total_messages}, New files downloaded: {new}")
+                  print(f"\n🎉 Done! Total: {total_messages}, New: {new}")
 
           if __name__ == '__main__':
               try:
@@ -209,16 +184,9 @@ jobs:
                   traceback.print_exc()
                   sys.exit(1)
           EOF
-          echo "✓ Script created"
+          echo "✓ Script created with embedded secrets"
 
       - name: Run download script
-        env:
-          API_ID: ${{ secrets.TG_API_ID }}
-          API_HASH: ${{ secrets.TG_API_HASH }}
-          STRING_SESSION: ${{ secrets.TG_STRING_SESSION }}
-          CHAT_TARGET: ${{ github.event.inputs.chat_target }}
-          START_ID: ${{ github.event.inputs.start_message_id }}
-          END_ID: ${{ github.event.inputs.end_message_id }}
         run: |
           echo "=== Running download script ==="
           python download_chat.py
