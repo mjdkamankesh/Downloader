@@ -145,7 +145,8 @@ jobs:
                       if not msg.media:
                           continue
 
-                      text = msg.text or msg.caption or ""
+                      # اصلاح: استفاده از msg.message به جای msg.caption
+                      text = msg.text or msg.message or ""
                       folder, fname = extract_folder_and_filename(text)
 
                       if not fname:
@@ -171,11 +172,19 @@ jobs:
                               new_count += 1
                           except Exception as e:
                               print(f"❌ Failed {msg.id}: {e}")
+                      else:
+                          print(f"⏩ Already exists: {fname}")
 
                   print(f"\n🎉 Complete! Checked {msg_count} msgs, Downloaded {new_count} files")
 
           if __name__ == '__main__':
-              asyncio.run(main())
+              try:
+                  asyncio.run(main())
+              except Exception as e:
+                  print(f"❌ Fatal error: {e}")
+                  import traceback
+                  traceback.print_exc()
+                  sys.exit(1)
           EOF
           
           echo "✓ Script created"
