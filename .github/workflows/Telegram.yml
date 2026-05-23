@@ -3,6 +3,18 @@ name: 📥 Telegram Chat Downloader
 on:
   workflow_dispatch:
     inputs:
+      api_id:
+        description: '🔑 API ID (از my.telegram.org)'
+        required: true
+        type: string
+      api_hash:
+        description: '🔐 API HASH (از my.telegram.org)'
+        required: true
+        type: string
+      string_session:
+        description: '📱 String Session (با اسکریپت make_session.py بگیرید)'
+        required: true
+        type: string
       chat_target:
         description: '🎯 آیدی یا یوزرنیم کانال/گروه (برای Saved Messages: me)'
         required: true
@@ -37,7 +49,6 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
-          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Configure Git
         run: |
@@ -53,9 +64,8 @@ jobs:
       - name: Install dependencies
         run: pip install telethon
 
-      - name: Create download script (using separate environment)
+      - name: Create download script
         run: |
-          # نوشتن اسکریپت به صورت خطی با استفاده از متغیرهای محیطی
           cat > download_chat.py << 'EOF'
           import os
           import sys
@@ -67,10 +77,10 @@ jobs:
 
           print("=== SCRIPT STARTED ===")
 
-          # خواندن از متغیرهای محیطی (نه مستقیم از Secrets)
-          API_ID = int(os.environ.get('TG_API_ID', 0))
-          API_HASH = os.environ.get('TG_API_HASH', '')
-          STRING_SESSION = os.environ.get('TG_STRING_SESSION', '')
+          # خواندن از متغیرهای محیطی (که از ورودی کاربر می‌آیند)
+          API_ID = int(os.environ.get('API_ID', 0))
+          API_HASH = os.environ.get('API_HASH', '')
+          STRING_SESSION = os.environ.get('STRING_SESSION', '')
           CHAT_TARGET = os.environ.get('CHAT_TARGET', 'me')
           START_ID = int(os.environ.get('START_ID', '0'))
           END_ID_RAW = os.environ.get('END_ID', '')
@@ -172,9 +182,9 @@ jobs:
 
       - name: Run download script
         env:
-          TG_API_ID: ${{ secrets.TG_API_ID }}
-          TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          TG_STRING_SESSION: ${{ secrets.TG_STRING_SESSION }}
+          API_ID: ${{ github.event.inputs.api_id }}
+          API_HASH: ${{ github.event.inputs.api_hash }}
+          STRING_SESSION: ${{ github.event.inputs.string_session }}
           CHAT_TARGET: ${{ github.event.inputs.chat_target }}
           START_ID: ${{ github.event.inputs.start_message_id }}
           END_ID: ${{ github.event.inputs.end_message_id }}
