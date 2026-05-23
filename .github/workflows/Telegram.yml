@@ -1,4 +1,4 @@
-name: 📥 Telegram Chat Downloader (Only Videos)
+name: 📥 Telegram Chat Downloader (With Progress)
 
 on:
   workflow_dispatch:
@@ -62,7 +62,7 @@ jobs:
       - name: Create script
         run: |
           cat > download.py << 'EOF'
-          import os, re, asyncio
+          import os, re, asyncio, sys
           from telethon import TelegramClient
           from telethon.sessions import StringSession
 
@@ -127,6 +127,26 @@ jobs:
               fname = '_'.join(file_parts) if file_parts else None
               return folder, fname
 
+          # ========== تابع نمایش پیشرفت دانلود ==========
+          def progress_callback(current, total):
+              """نمایش نوار پیشرفت و درصد دانلود"""
+              if total > 0:
+                  percent = (current / total) * 100
+                  bar_length = 25
+                  filled_length = int(bar_length * current // total)
+                  bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                  
+                  # نمایش در یک خط با بازنویسی
+                  output = f'\r    ⬇️  [{bar}] {percent:.1f}% ({current//1024//1024}MB/{total//1024//1024}MB)'
+                  # محدود کردن طول خروجی برای خطاهای احتمالی
+                  if len(output) > 200:
+                      output = f'\r    ⬇️  {percent:.1f}% ({current//1024//1024}/{total//1024//1024}MB)'
+                  sys.stdout.write(output)
+                  sys.stdout.flush()
+              else:
+                  sys.stdout.write(f'\r    ⬇️  دانلود... ({current//1024//1024}MB)')
+                  sys.stdout.flush()
+
           async def main():
               async with TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH) as client:
                   me = await client.get_me()
@@ -141,14 +161,15 @@ jobs:
                   video_count = 0
                   
                   print("🎬 Downloading ONLY VIDEO files...")
-                  print("🐢 One by one with 2s delay...")
+                  print("📊 Progress bar shows download status for each file")
+                  print("")
                   
                   async for msg in client.iter_messages(entity, min_id=START, max_id=END, reverse=True):
                       checked += 1
                       if checked % 100 == 0:
-                          print(f"📊 {checked} msgs, {video_count} videos found, {new} downloaded, {failed} failed")
+                          print(f"\n📊 Processed {checked} msgs, {video_count} videos found, {new} downloaded, {failed} failed")
                       
-                      # ========== فقط ویدیو ==========
+                      # فقط ویدیو
                       if not msg.video:
                           continue
                       
@@ -168,17 +189,26 @@ jobs:
                       else:
                           used_names[fname] = 1
                       
-                      # پسوند ویدیو
                       fname = fname + '.mp4'
-                      
                       path = os.path.join(BASE, folder, fname)
                       os.makedirs(os.path.dirname(path), exist_ok=True)
                       
                       if not os.path.exists(path):
                           try:
-                              print(f"⬇️ [{new+1}] {folder}/{fname}")
-                              await msg.download_media(file=path)
-                              print(f"✅ Done")
+                              # دریافت حجم فایل برای نمایش
+                              file_size = msg.file.size if msg.file else 0
+                              if file_size:
+                                  print(f"\n⬇️  [{new+1}] {folder}/{fname} ({file_size//1024//1024}MB)")
+                              else:
+                                  print(f"\n⬇️  [{new+1}] {folder}/{fname}")
+                              
+                              # دانلود با نمایش پیشرفت
+                              await msg.download_media(
+                                  file=path,
+                                  progress_callback=progress_callback
+                              )
+                              print(f"\n✅ Done! ({fname})")
+                              print("")
                               new += 1
                               await asyncio.sleep(2)
                               if new % 10 == 0:
@@ -190,23 +220,28 @@ jobs:
                                   short = f"video_{msg.id}.mp4"
                                   short_path = os.path.join(BASE, folder, short)
                                   try:
-                                      print(f"⬇️ Retry: {short}")
-                                      await msg.download_media(file=short_path)
-                                      print(f"✅ Done (short)")
+                                      print(f"\n⬇️  Retry with short name: {short}")
+                                      await msg.download_media(
+                                          file=short_path,
+                                          progress_callback=progress_callback
+                                      )
+                                      print(f"\n✅ Done (shortened)")
                                       new += 1
                                       await asyncio.sleep(2)
-                                  except:
-                                      print(f"❌ Failed {msg.id}")
+                                  except Exception as e2:
+                                      print(f"\n❌ Failed {msg.id}: {e2}")
                               else:
-                                  print(f"❌ {msg.id}: {str(e)[:50]}")
+                                  print(f"\n❌ {msg.id}: {str(e)[:80]}")
                       else:
-                          print(f"⏩ Exists: {fname}")
+                          print(f"⏩ Already exists: {fname}")
                   
-                  print(f"\n🎉 Complete!")
+                  print(f"\n" + "="*50)
+                  print(f"🎉 Complete!")
                   print(f"📊 Total messages checked: {checked}")
                   print(f"🎬 Videos found: {video_count}")
                   print(f"💾 Downloaded: {new}")
                   print(f"❌ Failed: {failed}")
+                  print("="*50)
 
           asyncio.run(main())
           EOF
