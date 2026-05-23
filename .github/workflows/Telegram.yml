@@ -1,4 +1,4 @@
-name: 📥 Telegram Chat Downloader (Only Videos)
+name: 📥 Telegram Chat Downloader (Video & Photo)
 
 on:
   workflow_dispatch:
@@ -20,6 +20,16 @@ on:
         required: true
         type: string
         default: 'me'
+      file_type:
+        description: '🎬 نوع فایل برای دانلود'
+        required: true
+        type: choice
+        default: 'video_photo'
+        options:
+          - 'video_photo'
+          - 'video'
+          - 'photo'
+          - 'all'
       start_message_id:
         description: '🔢 از شماره پیام (0 = ابتدای چت)'
         required: false
@@ -83,6 +93,7 @@ jobs:
           API_HASH = os.environ.get('API_HASH', '')
           STRING_SESSION = os.environ.get('STRING_SESSION', '')
           CHAT_TARGET = os.environ.get('CHAT_TARGET', 'me')
+          FILE_TYPE = os.environ.get('FILE_TYPE', 'video_photo')
           START_ID = int(os.environ.get('START_ID', '0'))
           END_ID_RAW = os.environ.get('END_ID', '')
           END_ID = int(END_ID_RAW) if END_ID_RAW and END_ID_RAW.strip() else None
@@ -91,6 +102,7 @@ jobs:
           print(f"API_HASH: {API_HASH[:10] if API_HASH else 'MISSING'}...")
           print(f"STRING_SESSION: {STRING_SESSION[:15] if STRING_SESSION else 'MISSING'}...")
           print(f"CHAT_TARGET: {CHAT_TARGET}")
+          print(f"FILE_TYPE: {FILE_TYPE}")
           print(f"START_ID: {START_ID}")
 
           if not API_ID or not API_HASH or not STRING_SESSION:
@@ -99,18 +111,57 @@ jobs:
 
           BASE_DIR = 'saved_files'
 
-          def is_video(message):
-              """بررسی کنید که آیا پیام حاوی ویدیو است"""
+          def get_file_type_and_ext(message):
+              """تشخیص نوع فایل و پسوند صحیح آن"""
               if not message.media:
-                  return False
+                  return None, None
               
-              # بررسی انواع مختلف ویدیو
-              if hasattr(message.media, 'video'):
-                  return True
+              # عکس
+              if hasattr(message.media, 'photo'):
+                  return 'photo', '.jpg'
+              
+              # ویدیو یا سایر اسناد
               if hasattr(message.media, 'document') and message.media.document:
                   mime_type = getattr(message.media.document, 'mime_type', '')
-                  return 'video' in mime_type
+                  
+                  # ویدیو
+                  if 'video' in mime_type:
+                      # تشخیص پسوند ویدیو
+                      if 'mp4' in mime_type:
+                          return 'video', '.mp4'
+                      elif 'x-matroska' in mime_type:
+                          return 'video', '.mkv'
+                      elif 'webm' in mime_type:
+                          return 'video', '.webm'
+                      else:
+                          return 'video', '.mp4'
+                  
+                  # عکس (اگر به عنوان document ارسال شده باشد)
+                  if 'image' in mime_type:
+                      if 'jpeg' in mime_type or 'jpg' in mime_type:
+                          return 'photo', '.jpg'
+                      elif 'png' in mime_type:
+                          return 'photo', '.png'
+                      elif 'gif' in mime_type:
+                          return 'photo', '.gif'
+                      else:
+                          return 'photo', '.jpg'
+                  
+                  # سایر فایل‌ها (ما فقط ویدیو و عکس می‌خواهیم)
+                  return 'other', None
               
+              return None, None
+
+          def should_download(file_type):
+              """بررسی آیا این نوع فایل باید دانلود شود"""
+              if FILE_TYPE == 'all':
+                  return True
+              if FILE_TYPE == 'video_photo':
+                  return file_type in ['video', 'photo']
+              if FILE_TYPE == 'video':
+                  return file_type == 'video'
+              if FILE_TYPE == 'photo':
+                  return file_type == 'photo'
               return False
 
           def extract_folder_and_filename(text):
@@ -121,30 +172,28 @@ jobs:
               tick_match = re.search(r'✅([^#]+)', text)
               if tick_match:
                   raw = tick_match.group(1).strip()
+                  # محدود کردن طول نام فایل به 150 کاراکتر
                   safe = re.sub(r'[\\/*?:"<>|]', '-', raw).strip()
+                  if len(safe) > 150:
+                      safe = safe[:150]
                   return folder_name, safe if safe else None
               return folder_name, None
 
-          def get_file_extension(message):
-              """دریافت پسوند فایل با مدیریت خطا"""
-              try:
-                  if hasattr(message.media, 'video'):
-                      ext = '.mp4'
-                  elif hasattr(message.media, 'document') and message.media.document:
-                      attrs = message.media.document.attributes
-                      for attr in attrs:
-                          if hasattr(attr, 'file_name') and attr.file_name:
-                              name = attr.file_name
-                              if '.' in name:
-                                  return '.' + name.split('.')[-1]
-                      mime_type = message.media.document.mime_type
-                      if 'video' in mime_type:
-                          return '.mp4'
-                      elif 'x-matroska' in mime_type:
-                          return '.mkv'
-                  return '.mp4'  # پیش‌فرض برای ویدیو
-              except:
-                  return '.mp4'
+          def get_original_filename(message):
+              """دریافت نام اصلی فایل اگر وجود داشته باشد"""
+              if hasattr(message.media, 'document') and message.media.document:
+                  attrs = message.media.document.attributes
+                  for attr in attrs:
+                      if hasattr(attr, 'file_name') and attr.file_name:
+                          name = attr.file_name
+                          # حذف پسوند از نام
+                          if '.' in name:
+                              name = '.'.join(name.split('.')[:-1])
+                          # محدود کردن طول
+                          if len(name) > 150:
+                              name = name[:150]
+                          return name
+              return None
 
           async def main():
               print("=== Connecting to Telegram ===")
@@ -170,54 +219,88 @@ jobs:
                   new_count = 0
                   msg_count = 0
                   video_count = 0
+                  photo_count = 0
 
                   min_id = START_ID if START_ID > 0 else 0
                   print(f"Starting from ID: {min_id}")
-                  print("🎬 Only downloading VIDEO files...")
+                  
+                  if FILE_TYPE == 'video_photo':
+                      print("🎬 Downloading: Videos and Photos")
+                  elif FILE_TYPE == 'video':
+                      print("🎬 Downloading: Videos only")
+                  elif FILE_TYPE == 'photo':
+                      print("📸 Downloading: Photos only")
+                  else:
+                      print("📁 Downloading: All files")
 
                   async for msg in client.iter_messages(entity, min_id=min_id, max_id=END_ID, reverse=True):
                       msg_count += 1
                       if msg_count % 100 == 0:
                           print(f"📊 Processed {msg_count} msgs...")
 
-                      # فقط ویدیوها را پردازش کن
-                      if not is_video(msg):
+                      # تشخیص نوع فایل و پسوند
+                      file_type, extension = get_file_type_and_ext(msg)
+                      if not file_type or not should_download(file_type):
                           continue
                       
-                      video_count += 1
+                      if file_type == 'video':
+                          video_count += 1
+                      else:
+                          photo_count += 1
+                      
                       text = msg.text or msg.message or ""
                       folder, fname = extract_folder_and_filename(text)
 
-                      # اگر اسم فایل از متن استخراج نشد، از اسم اصلی استفاده کن
+                      # اگر اسم فایل از متن استخراج نشد
                       if not fname:
-                          orig = getattr(msg.file, 'name', None)
-                          if orig:
-                              fname = os.path.basename(orig)
+                          # اول سعی کن اسم اصلی را بگیر
+                          original_name = get_original_filename(msg)
+                          if original_name:
+                              fname = original_name
                           else:
-                              # دریافت پسوند مناسب
-                              ext = get_file_extension(msg)
-                              fname = f"video_{msg.id}{ext}"
+                              fname = f"{file_type}_{msg.id}"
 
                       folder_path = os.path.join(BASE_DIR, folder)
                       os.makedirs(folder_path, exist_ok=True)
 
-                      # اطمینان از داشتن پسوند
-                      ext = get_file_extension(msg)
-                      if not fname.endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv')):
-                          fname += ext
+                      # اضافه کردن پسوند صحیح
+                      if not fname.endswith(extension):
+                          fname += extension
 
                       path = os.path.join(folder_path, fname)
+                      
+                      # بررسی طول مسیر (حداکثر 255 کاراکتر)
+                      if len(path) > 255:
+                          # کوتاه کردن نام فایل
+                          name_part = fname[:50]
+                          fname = f"{name_part}_{msg.id}{extension}"
+                          path = os.path.join(folder_path, fname)
+                      
                       if not os.path.exists(path):
                           try:
                               await msg.download_media(file=path)
-                              print(f"✅ [{video_count}] {folder}/{fname}")
+                              print(f"✅ [{file_type}] {folder}/{fname}")
                               new_count += 1
                           except Exception as e:
-                              print(f"❌ Failed {msg.id}: {e}")
+                              if "File name too long" in str(e):
+                                  # دوباره با نام کوتاه‌تر تلاش کن
+                                  short_name = f"{file_type}_{msg.id}{extension}"
+                                  short_path = os.path.join(folder_path, short_name)
+                                  try:
+                                      await msg.download_media(file=short_path)
+                                      print(f"✅ [{file_type}] {folder}/{short_name} (shortened)")
+                                      new_count += 1
+                                  except Exception as e2:
+                                      print(f"❌ Failed {msg.id}: {e2}")
+                              else:
+                                  print(f"❌ Failed {msg.id}: {e}")
                       else:
                           print(f"⏩ Already exists: {fname}")
 
-                  print(f"\n🎉 Complete! Total msgs: {msg_count}, Videos found: {video_count}, Downloaded: {new_count}")
+                  print(f"\n🎉 Complete!")
+                  print(f"📊 Total messages checked: {msg_count}")
+                  print(f"📈 Videos found: {video_count}, Photos found: {photo_count}")
+                  print(f"💾 Downloaded new files: {new_count}")
 
           if __name__ == '__main__':
               try:
@@ -237,10 +320,12 @@ jobs:
           API_HASH: ${{ github.event.inputs.api_hash }}
           STRING_SESSION: ${{ github.event.inputs.string_session }}
           CHAT_TARGET: ${{ github.event.inputs.chat_target }}
+          FILE_TYPE: ${{ github.event.inputs.file_type }}
           START_ID: ${{ github.event.inputs.start_message_id }}
           END_ID: ${{ github.event.inputs.end_message_id }}
         run: |
-          echo "=== Starting download (Videos only) ==="
+          echo "=== Starting download ==="
+          echo "File type filter: ${{ github.event.inputs.file_type }}"
           python download_chat.py
           echo "=== Download finished ==="
 
@@ -271,7 +356,6 @@ jobs:
             rm -rf "$name"
             cd ../..
 
-            # ساخت README
             readme="$BASE_DIR/${name}_README.md"
             echo "# $name" > "$readme"
             echo "" >> "$readme"
