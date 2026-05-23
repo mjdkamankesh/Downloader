@@ -1,14 +1,14 @@
-name: 📥 Telegram Chat Downloader
+name: 📥 Telegram Chat Downloader (One by One)
 
 on:
   workflow_dispatch:
     inputs:
       api_id:
-        description: '🔑 API ID (از my.telegram.org)'
+        description: '🔑 API ID'
         required: true
         type: string
       api_hash:
-        description: '🔐 API HASH (از my.telegram.org)'
+        description: '🔐 API HASH'
         required: true
         type: string
       string_session:
@@ -16,22 +16,22 @@ on:
         required: true
         type: string
       chat_target:
-        description: '🎯 آیدی یا یوزرنیم (برای Saved Messages: me)'
+        description: '🎯 هدف (برای Saved Messages: me)'
         required: true
         type: string
         default: 'me'
       start_message_id:
-        description: '🔢 از شماره پیام (0 = ابتدا)'
+        description: '🔢 از شماره پیام'
         required: false
         default: '0'
         type: string
       end_message_id:
-        description: '🔢 تا شماره پیام (خالی = تا آخر)'
+        description: '🔢 تا شماره پیام'
         required: false
         default: ''
         type: string
       zip_password:
-        description: '🔒 رمز فایل‌های زیپ (اختیاری)'
+        description: '🔒 رمز زیپ'
         required: false
         default: ''
         type: string
@@ -44,320 +44,192 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Configure Git
+      - name: Setup
         run: |
           git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-          git config --global pull.rebase true
+          git config --global user.email "actions@github.com"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
-        run: pip install telethon
+      - run: pip install telethon
 
-      - name: Create download script
+      - name: Create script
         run: |
-          cat > download_chat.py << 'EOF'
-          import os
-          import sys
-          import re
-          import asyncio
+          cat > download.py << 'EOF'
+          import os, re, asyncio
           from telethon import TelegramClient
           from telethon.sessions import StringSession
 
-          print("=== SCRIPT STARTED ===")
+          API_ID = ${{ github.event.inputs.api_id }}
+          API_HASH = "${{ github.event.inputs.api_hash }}"
+          STRING_SESSION = "${{ github.event.inputs.string_session }}"
+          CHAT = "${{ github.event.inputs.chat_target }}"
+          START = int("${{ github.event.inputs.start_message_id }}" or "0")
+          END_RAW = "${{ github.event.inputs.end_message_id }}"
+          END = int(END_RAW) if END_RAW.strip() else None
 
-          # خواندن از متغیرهای محیطی
-          API_ID = int(os.environ.get('API_ID', 0))
-          API_HASH = os.environ.get('API_HASH', '')
-          STRING_SESSION = os.environ.get('STRING_SESSION', '')
-          CHAT_TARGET = os.environ.get('CHAT_TARGET', 'me')
-          START_ID = int(os.environ.get('START_ID', '0'))
-          END_ID_RAW = os.environ.get('END_ID', '')
-          END_ID = int(END_ID_RAW) if END_ID_RAW and END_ID_RAW.strip() else None
+          BASE = "saved_files"
+          used_names = {}
 
-          print(f"API_ID: {API_ID}")
-          print(f"API_HASH: {API_HASH[:10] if API_HASH else 'MISSING'}...")
-          print(f"STRING_SESSION: {STRING_SESSION[:15] if STRING_SESSION else 'MISSING'}...")
-          print(f"CHAT_TARGET: {CHAT_TARGET}")
-          print(f"START_ID: {START_ID}")
+          def remove_emojis(t):
+              if not t: return ""
+              t = re.sub(r'[⚛️😱👤🆔▶️◀️✅🔹🔸📢💡📌📺🔗📱]', '', t)
+              t = re.sub(r'[\U00010000-\U0010ffff]', '', t)
+              return t.strip()
 
-          if not API_ID or not API_HASH or not STRING_SESSION:
-              print("❌ ERROR: Missing required credentials!")
-              sys.exit(1)
+          def clean_folder(t):
+              if not t: return ""
+              t = remove_emojis(t)
+              t = re.sub(r'[^\w\s\u0600-\u06FF]', '', t)
+              t = t.strip().replace(' ', '_')
+              t = re.sub(r'_+', '_', t)
+              return t[:50]
 
-          BASE_DIR = 'saved_files'
+          def clean_file(t):
+              if not t: return ""
+              t = remove_emojis(t)
+              t = re.sub(r'[\\/*?:"<>|]', '', t)
+              t = t.strip().replace(' ', '_')
+              t = re.sub(r'_+', '_', t)
+              return t[:80]
 
-          def remove_emojis(text):
-              """حذف ایموجی‌ها و کاراکترهای خاص"""
-              if not text:
-                  return ""
-              # حذف ایموجی‌های مشخص
-              text = re.sub(r'[⚛️😱👤🆔▶️◀️✅🔹🔸📢💡📌📺🔗📱🆔]', '', text)
-              # حذف ایموجی‌های یونیکد
-              text = re.sub(r'[\U00010000-\U0010ffff]', '', text)
-              return text.strip()
-
-          def clean_for_folder(text):
-              """پاکسازی متن برای نام پوشه"""
-              if not text:
-                  return ""
-              text = remove_emojis(text)
-              text = re.sub(r'[^\w\s\u0600-\u06FF]', '', text)
-              text = text.strip().replace(' ', '_')
-              text = re.sub(r'_+', '_', text)
-              return text[:50]
-
-          def clean_for_filename(text):
-              """پاکسازی متن برای نام فایل"""
-              if not text:
-                  return ""
-              text = remove_emojis(text)
-              text = re.sub(r'[\\/*?:"<>|]', '', text)
-              text = text.strip().replace(' ', '_')
-              text = re.sub(r'_+', '_', text)
-              return text[:80]
-
-          def extract_folder_and_filename(message):
-              """استخراج نام پوشه و فایل از متن پیام"""
-              text = message.text or message.message or ""
+          def get_folder_and_name(msg):
+              text = msg.text or msg.message or ""
               if not text:
                   return '_no_tag', None
-              
               lines = text.strip().split('\n')
               
-              # ========== ساخت نام پوشه ==========
+              # پوشه
               folder_parts = []
-              
-              # خط اول به پوشه اضافه می‌شود
               if lines:
-                  first_line = lines[0].strip()
-                  folder_parts.append(clean_for_folder(first_line))
-              
-              # خطوطی که با "دوره" شروع می‌شوند به پوشه اضافه می‌شوند
+                  folder_parts.append(clean_folder(lines[0]))
               for line in lines[1:]:
-                  if 'مدرس' in line or line.startswith('👤مدرس'):
-                      break
-                  clean_line = remove_emojis(line)
-                  if clean_line.startswith('دوره'):
-                      folder_parts.append(clean_for_folder(clean_line))
-              
+                  if 'مدرس' in line: break
+                  cl = remove_emojis(line)
+                  if cl.startswith('دوره'):
+                      folder_parts.append(clean_folder(cl))
               folder = '_'.join(folder_parts) if folder_parts else '_no_tag'
-              if not folder:
-                  folder = '_no_tag'
               
-              # ========== ساخت نام فایل ==========
-              filename_parts = []
-              
-              # خطوطی که با "دوره" شروع نمی‌شوند و خط اول نیستند
+              # فایل
+              file_parts = []
               for i, line in enumerate(lines):
-                  if 'مدرس' in line or line.startswith('👤مدرس'):
-                      break
-                  if i == 0:  # رد کردن خط اول
-                      continue
-                  clean_line = remove_emojis(line)
-                  if clean_line and not clean_line.startswith('دوره'):
-                      filename_parts.append(clean_for_filename(clean_line))
-              
-              filename = '_'.join(filename_parts) if filename_parts else None
-              
-              return folder, filename
+                  if 'مدرس' in line: break
+                  if i == 0: continue
+                  cl = remove_emojis(line)
+                  if cl and not cl.startswith('دوره'):
+                      file_parts.append(clean_file(cl))
+              fname = '_'.join(file_parts) if file_parts else None
+              return folder, fname
 
-          def get_file_extension(message):
-              """دریافت پسوند صحیح فایل"""
-              if hasattr(message.media, 'photo'):
-                  return '.jpg'
-              if hasattr(message.media, 'document'):
-                  mime = getattr(message.media.document, 'mime_type', '')
-                  if 'video' in mime:
-                      return '.mp4'
-                  elif 'image' in mime:
-                      return '.jpg'
-                  elif 'audio' in mime:
-                      return '.mp3'
+          def get_ext(msg):
+              if hasattr(msg.media, 'photo'): return '.jpg'
+              if hasattr(msg.media, 'document'):
+                  mime = getattr(msg.media.document, 'mime_type', '')
+                  if 'video' in mime: return '.mp4'
+                  if 'image' in mime: return '.jpg'
+                  if 'audio' in mime: return '.mp3'
               return '.mp4'
 
           async def main():
-              print("=== Connecting to Telegram ===")
               async with TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH) as client:
-                  print("✓ Client created")
+                  me = await client.get_me()
+                  print(f"✅ {me.first_name}")
+                  entity = await client.get_entity(CHAT)
+                  print(f"🎯 {entity.title if hasattr(entity,'title') else entity.id}")
                   
-                  try:
-                      me = await client.get_me()
-                      print(f"✓ Logged in as: {me.first_name}")
-                  except Exception as e:
-                      print(f"❌ Login failed: {e}")
-                      return
-
-                  try:
-                      entity = await client.get_entity(CHAT_TARGET)
-                      name = entity.title if hasattr(entity, 'title') else str(entity.id)
-                      print(f"✅ Target: {name}")
-                  except Exception as e:
-                      print(f"❌ Cannot access chat: {e}")
-                      return
-
-                  os.makedirs(BASE_DIR, exist_ok=True)
-                  new_count = 0
-                  msg_count = 0
-                  used_names = {}  # برای جلوگیری از نام‌های تکراری
-
-                  min_id = START_ID if START_ID > 0 else 0
-                  print(f"Starting from message ID: {min_id}")
-
-                  async for msg in client.iter_messages(entity, min_id=min_id, max_id=END_ID, reverse=True):
-                      msg_count += 1
-                      if msg_count % 100 == 0:
-                          print(f"📊 Processed {msg_count} messages...")
-
-                      if not msg.media:
-                          continue
-
-                      # دریافت نام پوشه و فایل
-                      folder, filename = extract_folder_and_filename(msg)
+                  os.makedirs(BASE, exist_ok=True)
+                  new = 0
+                  failed = 0
+                  checked = 0
+                  
+                  print("🐢 Downloading ONE BY ONE with 2s delay...")
+                  
+                  async for msg in client.iter_messages(entity, min_id=START, max_id=END, reverse=True):
+                      checked += 1
+                      if checked % 100 == 0:
+                          print(f"📊 {checked} msgs, {new} downloaded, {failed} failed")
                       
-                      # اگر اسم فایل پیدا نشد، از اسم اصلی استفاده کن
-                      if not filename:
+                      if not msg.media: continue
+                      
+                      folder, fname = get_folder_and_name(msg)
+                      if not fname:
                           orig = getattr(msg.file, 'name', None)
                           if orig:
-                              base = os.path.splitext(orig)[0]
-                              filename = clean_for_filename(base)
+                              fname = clean_file(os.path.splitext(orig)[0])
                           else:
-                              filename = f"msg_{msg.id}"
+                              fname = f"msg_{msg.id}"
                       
-                      # جلوگیری از نام تکراری
-                      if filename in used_names:
-                          used_names[filename] += 1
-                          filename = f"{filename}_{used_names[filename]}"
+                      if fname in used_names:
+                          used_names[fname] += 1
+                          fname = f"{fname}_{used_names[fname]}"
                       else:
-                          used_names[filename] = 1
+                          used_names[fname] = 1
                       
-                      # اضافه کردن پسوند
-                      ext = get_file_extension(msg)
-                      filename = filename + ext
+                      ext = get_ext(msg)
+                      fname = fname + ext
                       
-                      # ساخت مسیر کامل
-                      folder_path = os.path.join(BASE_DIR, folder)
-                      os.makedirs(folder_path, exist_ok=True)
-                      file_path = os.path.join(folder_path, filename)
+                      path = os.path.join(BASE, folder, fname)
+                      os.makedirs(os.path.dirname(path), exist_ok=True)
                       
-                      # دانلود فایل
-                      if not os.path.exists(file_path):
+                      if not os.path.exists(path):
                           try:
-                              await msg.download_media(file=file_path)
-                              print(f"✅ [{new_count+1}] {folder}/{filename}")
-                              new_count += 1
+                              print(f"⬇️ [{new+1}] {fname}")
+                              await msg.download_media(file=path)
+                              print(f"✅ Done")
+                              new += 1
+                              await asyncio.sleep(2)  # مکث ۲ ثانیه
+                              if new % 10 == 0:
+                                  print("⏸️ 10s break...")
+                                  await asyncio.sleep(10)
                           except Exception as e:
-                              if "too long" in str(e) or "Name too long" in str(e):
-                                  # استفاده از نام کوتاه‌تر
-                                  short_name = f"msg_{msg.id}{ext}"
-                                  short_path = os.path.join(folder_path, short_name)
+                              failed += 1
+                              if "too long" in str(e):
+                                  short = f"msg_{msg.id}{ext}"
+                                  short_path = os.path.join(BASE, folder, short)
                                   try:
+                                      print(f"⬇️ Retry: {short}")
                                       await msg.download_media(file=short_path)
-                                      print(f"✅ [{new_count+1}] {folder}/{short_name} (shortened)")
-                                      new_count += 1
-                                  except Exception as e2:
-                                      print(f"❌ Failed msg {msg.id}: {e2}")
+                                      print(f"✅ Done (short)")
+                                      new += 1
+                                      await asyncio.sleep(2)
+                                  except:
+                                      print(f"❌ Failed {msg.id}")
                               else:
-                                  print(f"❌ Failed msg {msg.id}: {e}")
+                                  print(f"❌ {msg.id}: {str(e)[:50]}")
                       else:
-                          print(f"⏩ Already exists: {filename}")
+                          print(f"⏩ Exists: {fname}")
+                  
+                  print(f"\n🎉 Complete! Checked {checked}, Downloaded {new}, Failed {failed}")
 
-                  print(f"\n🎉 Complete!")
-                  print(f"📊 Total messages checked: {msg_count}")
-                  print(f"💾 New files downloaded: {new_count}")
-
-          if __name__ == '__main__':
-              try:
-                  asyncio.run(main())
-              except Exception as e:
-                  print(f"❌ Fatal error: {e}")
-                  import traceback
-                  traceback.print_exc()
-                  sys.exit(1)
+          asyncio.run(main())
           EOF
-          
-          echo "✓ Script created"
 
-      - name: Run download script
+      - name: Run
         env:
           API_ID: ${{ github.event.inputs.api_id }}
           API_HASH: ${{ github.event.inputs.api_hash }}
           STRING_SESSION: ${{ github.event.inputs.string_session }}
-          CHAT_TARGET: ${{ github.event.inputs.chat_target }}
-          START_ID: ${{ github.event.inputs.start_message_id }}
-          END_ID: ${{ github.event.inputs.end_message_id }}
-        run: |
-          echo "=== Starting download ==="
-          python download_chat.py
-          echo "=== Download finished ==="
+        run: python download.py
 
-      - name: Zip, split & create README
+      - name: Zip
         if: success()
-        env:
-          ZIP_PASSWORD: ${{ github.event.inputs.zip_password }}
         run: |
-          BASE_DIR="saved_files"
-          SPLIT_SIZE=45
-          REPO_OWNER="${{ github.repository_owner }}"
-          REPO_NAME="${{ github.event.repository.name }}"
-          BRANCH="${GITHUB_REF_NAME}"
-
-          if [ ! -d "$BASE_DIR" ]; then
-            echo "No files found"
-            exit 0
-          fi
-
-          urlencode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$1"; }
-
-          for folder in "$BASE_DIR"/*/ ; do
-            [ -d "$folder" ] || continue
+          for folder in saved_files/*/; do
             name=$(basename "$folder")
-            echo "📦 Zipping: $name"
-
-            cd "$BASE_DIR"
-            rm -f "${name}.zip" "${name}.z"* 2>/dev/null
-            if [ -n "$ZIP_PASSWORD" ]; then
-              zip -r -P "$ZIP_PASSWORD" -s ${SPLIT_SIZE}m "${name}.zip" "$name"
-            else
-              zip -r -s ${SPLIT_SIZE}m "${name}.zip" "$name"
-            fi
-            rm -rf "$name"
-            cd ../..
-
-            # ساخت README
-            readme="$BASE_DIR/${name}_README.md"
-            echo "# $name" > "$readme"
-            echo "" >> "$readme"
-            echo "| # | Part | Download |" >> "$readme"
-            echo "|---|------|----------|" >> "$readme"
-            
-            count=1
-            for part in $(ls "$BASE_DIR/${name}.zip" "$BASE_DIR/${name}.z"* 2>/dev/null | sort); do
-              bname=$(basename "$part")
-              enc=$(urlencode "$bname")
-              link="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/saved_files/${enc}"
-              echo "| $count | \`$bname\` | [Download]($link) |" >> "$readme"
-              count=$((count+1))
-            done
-            echo "✅ $name → $((count-1)) parts"
+            cd saved_files
+            zip -r -s 45m "${name}.zip" "$name" && rm -rf "$name"
+            cd ..
           done
 
-      - name: Commit and push
+      - name: Push
         if: success()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin ${GITHUB_REF_NAME} --no-edit || true
           git add saved_files/
-          git diff --quiet && git diff --staged --quiet || git commit -m "Backup $(date -u '+%Y-%m-%d %H:%M:%S')"
+          git commit -m "Backup $(date -u '+%Y-%m-%d')" || true
           git push
