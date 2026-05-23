@@ -1,4 +1,4 @@
-name: 📥 Telegram Chat Downloader (With Progress)
+name: 📥 Telegram Chat Downloader (Hashtag Filter Only)
 
 on:
   workflow_dispatch:
@@ -20,18 +20,13 @@ on:
         required: true
         type: string
         default: 'me'
-      start_message_id:
-        description: '🔢 از شماره پیام'
+      hashtag_filter:
+        description: '🏷️ هشتگ مورد نظر (مثال: ویپ_ایزابل یا SANS511) - خالی = همه'
         required: false
-        default: '0'
         type: string
-      end_message_id:
-        description: '🔢 تا شماره پیام'
-        required: false
         default: ''
-        type: string
       zip_password:
-        description: '🔒 رمز زیپ'
+        description: '🔒 رمز فایل‌های زیپ (اختیاری)'
         required: false
         default: ''
         type: string
@@ -62,7 +57,7 @@ jobs:
       - name: Create script
         run: |
           cat > download.py << 'EOF'
-          import os, re, asyncio, sys
+          import os, re, asyncio
           from telethon import TelegramClient
           from telethon.sessions import StringSession
 
@@ -70,12 +65,21 @@ jobs:
           API_HASH = "${{ github.event.inputs.api_hash }}"
           STRING_SESSION = "${{ github.event.inputs.string_session }}"
           CHAT = "${{ github.event.inputs.chat_target }}"
-          START = int("${{ github.event.inputs.start_message_id }}" or "0")
-          END_RAW = "${{ github.event.inputs.end_message_id }}"
-          END = int(END_RAW) if END_RAW.strip() else None
+          HASHTAG_FILTER = "${{ github.event.inputs.hashtag_filter }}".strip()
 
           BASE = "saved_files"
           used_names = {}
+
+          print("="*50)
+          print("Telegram Video Downloader")
+          print("="*50)
+          print(f"Chat target: {CHAT}")
+          if HASHTAG_FILTER:
+              print(f"🏷️  Hashtag filter: #{HASHTAG_FILTER}")
+          else:
+              print(f"🏷️  Hashtag filter: ALL (no filter)")
+          print("="*50)
+          print("")
 
           def remove_emojis(t):
               if not t: return ""
@@ -99,13 +103,23 @@ jobs:
               t = re.sub(r'_+', '_', t)
               return t[:80]
 
+          def extract_hashtags(text):
+              if not text:
+                  return []
+              return re.findall(r'#(\w+)', text)
+
+          def has_matching_hashtag(text):
+              if not HASHTAG_FILTER:
+                  return True
+              hashtags = extract_hashtags(text)
+              return any(h.lower() == HASHTAG_FILTER.lower() for h in hashtags)
+
           def get_folder_and_name(msg):
               text = msg.text or msg.message or ""
               if not text:
                   return '_no_tag', None
               lines = text.strip().split('\n')
               
-              # پوشه
               folder_parts = []
               if lines:
                   folder_parts.append(clean_folder(lines[0]))
@@ -116,7 +130,6 @@ jobs:
                       folder_parts.append(clean_folder(cl))
               folder = '_'.join(folder_parts) if folder_parts else '_no_tag'
               
-              # فایل
               file_parts = []
               for i, line in enumerate(lines):
                   if 'مدرس' in line: break
@@ -127,53 +140,40 @@ jobs:
               fname = '_'.join(file_parts) if file_parts else None
               return folder, fname
 
-          # ========== تابع نمایش پیشرفت دانلود ==========
-          def progress_callback(current, total):
-              """نمایش نوار پیشرفت و درصد دانلود"""
-              if total > 0:
-                  percent = (current / total) * 100
-                  bar_length = 25
-                  filled_length = int(bar_length * current // total)
-                  bar = '█' * filled_length + '░' * (bar_length - filled_length)
-                  
-                  # نمایش در یک خط با بازنویسی
-                  output = f'\r    ⬇️  [{bar}] {percent:.1f}% ({current//1024//1024}MB/{total//1024//1024}MB)'
-                  # محدود کردن طول خروجی برای خطاهای احتمالی
-                  if len(output) > 200:
-                      output = f'\r    ⬇️  {percent:.1f}% ({current//1024//1024}/{total//1024//1024}MB)'
-                  sys.stdout.write(output)
-                  sys.stdout.flush()
-              else:
-                  sys.stdout.write(f'\r    ⬇️  دانلود... ({current//1024//1024}MB)')
-                  sys.stdout.flush()
-
           async def main():
               async with TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH) as client:
                   me = await client.get_me()
-                  print(f"✅ {me.first_name}")
+                  print(f"✅ Logged in as: {me.first_name}")
                   entity = await client.get_entity(CHAT)
-                  print(f"🎯 {entity.title if hasattr(entity,'title') else entity.id}")
+                  print(f"🎯 Target: {entity.title if hasattr(entity,'title') else entity.id}")
+                  print("")
                   
                   os.makedirs(BASE, exist_ok=True)
                   new = 0
                   failed = 0
                   checked = 0
                   video_count = 0
+                  skipped = 0
                   
-                  print("🎬 Downloading ONLY VIDEO files...")
-                  print("📊 Progress bar shows download status for each file")
+                  if HASHTAG_FILTER:
+                      print(f"🏷️  Filtering videos with hashtag: #{HASHTAG_FILTER}")
+                  print("🎬 Downloading VIDEO files...")
                   print("")
                   
-                  async for msg in client.iter_messages(entity, min_id=START, max_id=END, reverse=True):
+                  async for msg in client.iter_messages(entity, reverse=True):
                       checked += 1
-                      if checked % 100 == 0:
-                          print(f"\n📊 Processed {checked} msgs, {video_count} videos found, {new} downloaded, {failed} failed")
+                      if checked % 500 == 0:
+                          print(f"📊 Processed {checked} msgs | Videos: {video_count} | Downloaded: {new} | Failed: {failed}")
                       
-                      # فقط ویدیو
                       if not msg.video:
                           continue
                       
                       video_count += 1
+                      text = msg.text or msg.message or ""
+                      
+                      if not has_matching_hashtag(text):
+                          skipped += 1
+                          continue
                       
                       folder, fname = get_folder_and_name(msg)
                       if not fname:
@@ -195,50 +195,35 @@ jobs:
                       
                       if not os.path.exists(path):
                           try:
-                              # دریافت حجم فایل برای نمایش
-                              file_size = msg.file.size if msg.file else 0
-                              if file_size:
-                                  print(f"\n⬇️  [{new+1}] {folder}/{fname} ({file_size//1024//1024}MB)")
-                              else:
-                                  print(f"\n⬇️  [{new+1}] {folder}/{fname}")
-                              
-                              # دانلود با نمایش پیشرفت
-                              await msg.download_media(
-                                  file=path,
-                                  progress_callback=progress_callback
-                              )
-                              print(f"\n✅ Done! ({fname})")
-                              print("")
+                              await msg.download_media(file=path)
                               new += 1
-                              await asyncio.sleep(2)
-                              if new % 10 == 0:
-                                  print("⏸️ 10s break...")
-                                  await asyncio.sleep(10)
+                              print(f"✅ [{new}] {folder}/{fname}")
+                              await asyncio.sleep(1)
                           except Exception as e:
                               failed += 1
                               if "too long" in str(e):
                                   short = f"video_{msg.id}.mp4"
                                   short_path = os.path.join(BASE, folder, short)
                                   try:
-                                      print(f"\n⬇️  Retry with short name: {short}")
-                                      await msg.download_media(
-                                          file=short_path,
-                                          progress_callback=progress_callback
-                                      )
-                                      print(f"\n✅ Done (shortened)")
+                                      await msg.download_media(file=short_path)
                                       new += 1
-                                      await asyncio.sleep(2)
-                                  except Exception as e2:
-                                      print(f"\n❌ Failed {msg.id}: {e2}")
+                                      print(f"✅ [{new}] {folder}/{short} (shortened)")
+                                      await asyncio.sleep(1)
+                                  except:
+                                      print(f"❌ Failed msg {msg.id}")
                               else:
-                                  print(f"\n❌ {msg.id}: {str(e)[:80]}")
+                                  print(f"❌ Failed msg {msg.id}: {str(e)[:50]}")
                       else:
                           print(f"⏩ Already exists: {fname}")
                   
-                  print(f"\n" + "="*50)
+                  print("")
+                  print("="*50)
                   print(f"🎉 Complete!")
                   print(f"📊 Total messages checked: {checked}")
                   print(f"🎬 Videos found: {video_count}")
+                  if HASHTAG_FILTER:
+                      print(f"🏷️  Videos with #{HASHTAG_FILTER}: {new + failed}")
+                      print(f"⏭️  Skipped (other hashtags): {skipped}")
                   print(f"💾 Downloaded: {new}")
                   print(f"❌ Failed: {failed}")
                   print("="*50)
