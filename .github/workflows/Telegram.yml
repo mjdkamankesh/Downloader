@@ -1,4 +1,4 @@
-name: 📥 Telegram Chat Downloader (One by One)
+name: 📥 Telegram Chat Downloader (Only Videos)
 
 on:
   workflow_dispatch:
@@ -127,15 +127,6 @@ jobs:
               fname = '_'.join(file_parts) if file_parts else None
               return folder, fname
 
-          def get_ext(msg):
-              if hasattr(msg.media, 'photo'): return '.jpg'
-              if hasattr(msg.media, 'document'):
-                  mime = getattr(msg.media.document, 'mime_type', '')
-                  if 'video' in mime: return '.mp4'
-                  if 'image' in mime: return '.jpg'
-                  if 'audio' in mime: return '.mp3'
-              return '.mp4'
-
           async def main():
               async with TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH) as client:
                   me = await client.get_me()
@@ -147,15 +138,21 @@ jobs:
                   new = 0
                   failed = 0
                   checked = 0
+                  video_count = 0
                   
-                  print("🐢 Downloading ONE BY ONE with 2s delay...")
+                  print("🎬 Downloading ONLY VIDEO files...")
+                  print("🐢 One by one with 2s delay...")
                   
                   async for msg in client.iter_messages(entity, min_id=START, max_id=END, reverse=True):
                       checked += 1
                       if checked % 100 == 0:
-                          print(f"📊 {checked} msgs, {new} downloaded, {failed} failed")
+                          print(f"📊 {checked} msgs, {video_count} videos found, {new} downloaded, {failed} failed")
                       
-                      if not msg.media: continue
+                      # ========== فقط ویدیو ==========
+                      if not msg.video:
+                          continue
+                      
+                      video_count += 1
                       
                       folder, fname = get_folder_and_name(msg)
                       if not fname:
@@ -163,7 +160,7 @@ jobs:
                           if orig:
                               fname = clean_file(os.path.splitext(orig)[0])
                           else:
-                              fname = f"msg_{msg.id}"
+                              fname = f"video_{msg.id}"
                       
                       if fname in used_names:
                           used_names[fname] += 1
@@ -171,26 +168,26 @@ jobs:
                       else:
                           used_names[fname] = 1
                       
-                      ext = get_ext(msg)
-                      fname = fname + ext
+                      # پسوند ویدیو
+                      fname = fname + '.mp4'
                       
                       path = os.path.join(BASE, folder, fname)
                       os.makedirs(os.path.dirname(path), exist_ok=True)
                       
                       if not os.path.exists(path):
                           try:
-                              print(f"⬇️ [{new+1}] {fname}")
+                              print(f"⬇️ [{new+1}] {folder}/{fname}")
                               await msg.download_media(file=path)
                               print(f"✅ Done")
                               new += 1
-                              await asyncio.sleep(2)  # مکث ۲ ثانیه
+                              await asyncio.sleep(2)
                               if new % 10 == 0:
                                   print("⏸️ 10s break...")
                                   await asyncio.sleep(10)
                           except Exception as e:
                               failed += 1
                               if "too long" in str(e):
-                                  short = f"msg_{msg.id}{ext}"
+                                  short = f"video_{msg.id}.mp4"
                                   short_path = os.path.join(BASE, folder, short)
                                   try:
                                       print(f"⬇️ Retry: {short}")
@@ -205,7 +202,11 @@ jobs:
                       else:
                           print(f"⏩ Exists: {fname}")
                   
-                  print(f"\n🎉 Complete! Checked {checked}, Downloaded {new}, Failed {failed}")
+                  print(f"\n🎉 Complete!")
+                  print(f"📊 Total messages checked: {checked}")
+                  print(f"🎬 Videos found: {video_count}")
+                  print(f"💾 Downloaded: {new}")
+                  print(f"❌ Failed: {failed}")
 
           asyncio.run(main())
           EOF
@@ -231,5 +232,5 @@ jobs:
         if: success()
         run: |
           git add saved_files/
-          git commit -m "Backup $(date -u '+%Y-%m-%d')" || true
+          git commit -m "Video backup $(date -u '+%Y-%m-%d')" || true
           git push
