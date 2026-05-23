@@ -24,11 +24,6 @@ on:
         default: ''
         type: string
 
-# جلوگیری از اجرای همزمان
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   backup:
     runs-on: ubuntu-latest
@@ -58,9 +53,10 @@ jobs:
       - name: Install dependencies
         run: pip install telethon
 
-      - name: Create download script with embedded values
+      - name: Create download script (using separate environment)
         run: |
-          cat > download_chat.py << EOF
+          # نوشتن اسکریپت به صورت خطی با استفاده از متغیرهای محیطی
+          cat > download_chat.py << 'EOF'
           import os
           import sys
           import re
@@ -71,30 +67,30 @@ jobs:
 
           print("=== SCRIPT STARTED ===")
 
-          # مقادیر مستقیم از Secrets
-          API_ID = ${{ secrets.TG_API_ID }}
-          API_HASH = "${{ secrets.TG_API_HASH }}"
-          STRING_SESSION = "${{ secrets.TG_STRING_SESSION }}"
-          
-          # ورودی‌های کاربر
-          CHAT_TARGET = "${{ github.event.inputs.chat_target }}"
-          START_ID = ${{ github.event.inputs.start_message_id }}
-          END_ID_RAW = "${{ github.event.inputs.end_message_id }}"
+          # خواندن از متغیرهای محیطی (نه مستقیم از Secrets)
+          API_ID = int(os.environ.get('TG_API_ID', 0))
+          API_HASH = os.environ.get('TG_API_HASH', '')
+          STRING_SESSION = os.environ.get('TG_STRING_SESSION', '')
+          CHAT_TARGET = os.environ.get('CHAT_TARGET', 'me')
+          START_ID = int(os.environ.get('START_ID', '0'))
+          END_ID_RAW = os.environ.get('END_ID', '')
+          END_ID = int(END_ID_RAW) if END_ID_RAW and END_ID_RAW.strip() else None
 
           print(f"API_ID: {API_ID}")
-          print(f"API_HASH: {API_HASH[:5]}...")
-          print(f"STRING_SESSION: {STRING_SESSION[:10]}...")
+          print(f"API_HASH: {API_HASH[:10] if API_HASH else 'MISSING'}...")
+          print(f"STRING_SESSION: {STRING_SESSION[:15] if STRING_SESSION else 'MISSING'}...")
           print(f"CHAT_TARGET: {CHAT_TARGET}")
           print(f"START_ID: {START_ID}")
 
-          START_ID = int(START_ID) if START_ID else 0
-          END_ID = int(END_ID_RAW) if END_ID_RAW and END_ID_RAW.strip() else None
+          if not API_ID or not API_HASH or not STRING_SESSION:
+              print("❌ ERROR: Missing required credentials!")
+              sys.exit(1)
 
           BASE_DIR = 'saved_files'
 
           def extract_folder_and_filename(text):
               if not text:
-                  return None, None
+                  return '_no_tag', None
               hashtag_match = re.search(r'#(\w+)', text)
               folder_name = hashtag_match.group(1) if hashtag_match else '_no_tag'
               tick_match = re.search(r'✅([^#]+)', text)
@@ -111,91 +107,81 @@ jobs:
                   
                   try:
                       me = await client.get_me()
-                      print(f"✓ Logged in as: {me.first_name} (ID: {me.id})")
+                      print(f"✓ Logged in as: {me.first_name}")
                   except Exception as e:
-                      print(f"❌ Failed to get user info: {e}")
+                      print(f"❌ Login failed: {e}")
                       return
 
                   try:
-                      print(f"Looking for chat: {CHAT_TARGET}")
                       entity = await client.get_entity(CHAT_TARGET)
                       name = entity.title if hasattr(entity, 'title') else str(entity.id)
-                      print(f"✅ Connected to: {name}")
+                      print(f"✅ Target: {name}")
                   except Exception as e:
-                      print(f"❌ Error getting entity: {e}")
+                      print(f"❌ Cannot access chat: {e}")
                       return
 
                   os.makedirs(BASE_DIR, exist_ok=True)
-                  print(f"✓ Base directory: {BASE_DIR}")
-                  new = 0
-                  total = 0
+                  new_count = 0
+                  msg_count = 0
 
                   min_id = START_ID if START_ID > 0 else 0
-                  print(f"Starting from message ID: {min_id}")
+                  print(f"Starting from ID: {min_id}")
 
-                  try:
-                      async for msg in client.iter_messages(entity, min_id=min_id, max_id=END_ID, reverse=True):
-                          total += 1
-                          if total % 50 == 0:
-                              print(f"📊 Processed {total} messages...")
-                          
-                          if END_ID and msg.id > END_ID:
-                              break
-                          if not msg.media:
-                              continue
+                  async for msg in client.iter_messages(entity, min_id=min_id, max_id=END_ID, reverse=True):
+                      msg_count += 1
+                      if msg_count % 100 == 0:
+                          print(f"📊 Processed {msg_count} msgs...")
 
-                          text = msg.text or msg.caption or ""
-                          folder, fname = extract_folder_and_filename(text)
+                      if not msg.media:
+                          continue
 
-                          if not fname:
-                              orig = getattr(msg.file, 'name', None)
-                              if orig:
-                                  fname = os.path.basename(orig)
-                              else:
-                                  ext = msg.file.ext or '.bin'
-                                  fname = f"{msg.id}{ext}"
+                      text = msg.text or msg.caption or ""
+                      folder, fname = extract_folder_and_filename(text)
 
-                          folder_path = os.path.join(BASE_DIR, folder)
-                          os.makedirs(folder_path, exist_ok=True)
-
-                          ext = msg.file.ext or ''
-                          if ext and not fname.endswith(ext):
-                              fname += ext
-
-                          path = os.path.join(folder_path, fname)
-                          if not os.path.exists(path):
-                              try:
-                                  await msg.download_media(file=path)
-                                  print(f"✅ {folder}/{fname} (msg {msg.id})")
-                                  new += 1
-                              except Exception as e:
-                                  print(f"❌ msg {msg.id}: {e}")
+                      if not fname:
+                          orig = getattr(msg.file, 'name', None)
+                          if orig:
+                              fname = os.path.basename(orig)
                           else:
-                              print(f"⏩ Already exists: {fname}")
+                              ext = msg.file.ext or '.bin'
+                              fname = f"{msg.id}{ext}"
 
-                  except Exception as e:
-                      print(f"❌ Error during iteration: {e}")
-                      return
+                      folder_path = os.path.join(BASE_DIR, folder)
+                      os.makedirs(folder_path, exist_ok=True)
 
-                  print(f"\n🎉 Done! Total messages: {total}, New files: {new}")
+                      ext = msg.file.ext or ''
+                      if ext and not fname.endswith(ext):
+                          fname += ext
+
+                      path = os.path.join(folder_path, fname)
+                      if not os.path.exists(path):
+                          try:
+                              await msg.download_media(file=path)
+                              print(f"✅ {folder}/{fname}")
+                              new_count += 1
+                          except Exception as e:
+                              print(f"❌ Failed {msg.id}: {e}")
+
+                  print(f"\n🎉 Complete! Checked {msg_count} msgs, Downloaded {new_count} files")
 
           if __name__ == '__main__':
-              try:
-                  asyncio.run(main())
-              except Exception as e:
-                  print(f"❌ Fatal error: {e}")
-                  import traceback
-                  traceback.print_exc()
-                  sys.exit(1)
+              asyncio.run(main())
           EOF
           
-          echo "✓ Script created successfully"
+          echo "✓ Script created"
 
       - name: Run download script
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_STRING_SESSION: ${{ secrets.TG_STRING_SESSION }}
+          CHAT_TARGET: ${{ github.event.inputs.chat_target }}
+          START_ID: ${{ github.event.inputs.start_message_id }}
+          END_ID: ${{ github.event.inputs.end_message_id }}
         run: |
-          echo "=== Running download script ==="
+          echo "=== Starting download ==="
           python download_chat.py
-          echo "=== Script finished ==="
+          echo "=== Download finished ==="
 
       - name: Zip, split & create README
         if: success()
@@ -203,47 +189,43 @@ jobs:
           ZIP_PASSWORD: ${{ github.event.inputs.zip_password }}
         run: |
           BASE_DIR="saved_files"
-          SPLIT_THRESHOLD_MB=45
+          SPLIT_SIZE=45
           REPO_OWNER="${{ github.repository_owner }}"
           REPO_NAME="${{ github.event.repository.name }}"
           BRANCH="${GITHUB_REF_NAME}"
 
-          if [ ! -d "$BASE_DIR" ]; then
-            echo "No saved_files directory. Exiting."
-            exit 0
-          fi
+          [ ! -d "$BASE_DIR" ] && echo "No files found" && exit 0
 
-          urlencode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"; }
+          urlencode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$1"; }
 
           for folder in "$BASE_DIR"/*/ ; do
             [ -d "$folder" ] || continue
-            foldername=$(basename "$folder")
-            echo "Processing folder: $foldername"
+            name=$(basename "$folder")
+            echo "📦 Zipping: $name"
 
             cd "$BASE_DIR"
-            rm -f "${foldername}.zip" "${foldername}.z"* 2>/dev/null || true
-            if [ -n "$ZIP_PASSWORD" ]; then
-              zip -r -P "$ZIP_PASSWORD" -s ${SPLIT_THRESHOLD_MB}m "${foldername}.zip" "$foldername"
-            else
-              zip -r -s ${SPLIT_THRESHOLD_MB}m "${foldername}.zip" "$foldername"
-            fi
-            rm -rf "$foldername"
+            rm -f "${name}.zip" "${name}.z"* 2>/dev/null
+            [ -n "$ZIP_PASSWORD" ] && pass="-P $ZIP_PASSWORD" || pass=""
+            zip -r $pass -s ${SPLIT_SIZE}m "${name}.zip" "$name"
+            rm -rf "$name"
             cd ../..
 
-            final_readme="$BASE_DIR/${foldername}_README.md"
-            echo "# Archive: $foldername" > "$final_readme"
-            echo "" >> "$final_readme"
-            echo "| # | Part | Download |" >> "$final_readme"
-            echo "|---|------|----------|" >> "$final_readme"
-            link_counter=1
-            for part in $(ls "$BASE_DIR/${foldername}.zip" "$BASE_DIR/${foldername}.z"* 2>/dev/null | sort); do
-              part_basename=$(basename "$part")
-              part_encoded=$(urlencode "$part_basename")
-              raw_link="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/saved_files/${part_encoded}"
-              echo "| $link_counter | \`$part_basename\` | [Download]($raw_link) |" >> "$final_readme"
-              link_counter=$((link_counter+1))
+            # ساخت README
+            readme="$BASE_DIR/${name}_README.md"
+            echo "# $name" > "$readme"
+            echo "" >> "$readme"
+            echo "| # | Part | Download |" >> "$readme"
+            echo "|---|------|----------|" >> "$readme"
+            
+            count=1
+            for part in $(ls "$BASE_DIR/${name}.zip" "$BASE_DIR/${name}.z"* 2>/dev/null | sort); do
+              bname=$(basename "$part")
+              enc=$(urlencode "$bname")
+              link="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/saved_files/${enc}"
+              echo "| $count | \`$bname\` | [Download]($link) |" >> "$readme"
+              count=$((count+1))
             done
-            echo "✅ $foldername → $((link_counter-1)) parts"
+            echo "✅ $name → $((count-1)) parts"
           done
 
       - name: Commit and push
@@ -251,15 +233,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # دریافت آخرین تغییرات از مخزن
           git pull --rebase origin ${GITHUB_REF_NAME} --no-edit || true
-          
           git add saved_files/
-          
-          if git diff --quiet && git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Backup from chat $(date -u '+%Y-%m-%d %H:%M:%S')"
-            git push
-          fi
+          git diff --quiet && git diff --staged --quiet || git commit -m "Backup $(date -u '+%Y-%m-%d %H:%M:%S')"
+          git push
