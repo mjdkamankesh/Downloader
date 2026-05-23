@@ -1,4 +1,4 @@
-name: 📥 Telegram Chat Downloader
+name: 📥 Telegram Chat Downloader (Only Videos)
 
 on:
   workflow_dispatch:
@@ -74,10 +74,11 @@ jobs:
           from telethon import TelegramClient
           from telethon.sessions import StringSession
           from telethon.errors import UsernameNotOccupiedError, ChannelPrivateError
+          from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
 
           print("=== SCRIPT STARTED ===")
 
-          # خواندن از متغیرهای محیطی (که از ورودی کاربر می‌آیند)
+          # خواندن از متغیرهای محیطی
           API_ID = int(os.environ.get('API_ID', 0))
           API_HASH = os.environ.get('API_HASH', '')
           STRING_SESSION = os.environ.get('STRING_SESSION', '')
@@ -98,6 +99,20 @@ jobs:
 
           BASE_DIR = 'saved_files'
 
+          def is_video(message):
+              """بررسی کنید که آیا پیام حاوی ویدیو است"""
+              if not message.media:
+                  return False
+              
+              # بررسی انواع مختلف ویدیو
+              if hasattr(message.media, 'video'):
+                  return True
+              if hasattr(message.media, 'document') and message.media.document:
+                  mime_type = getattr(message.media.document, 'mime_type', '')
+                  return 'video' in mime_type
+              
+              return False
+
           def extract_folder_and_filename(text):
               if not text:
                   return '_no_tag', None
@@ -109,6 +124,27 @@ jobs:
                   safe = re.sub(r'[\\/*?:"<>|]', '-', raw).strip()
                   return folder_name, safe if safe else None
               return folder_name, None
+
+          def get_file_extension(message):
+              """دریافت پسوند فایل با مدیریت خطا"""
+              try:
+                  if hasattr(message.media, 'video'):
+                      ext = '.mp4'
+                  elif hasattr(message.media, 'document') and message.media.document:
+                      attrs = message.media.document.attributes
+                      for attr in attrs:
+                          if hasattr(attr, 'file_name') and attr.file_name:
+                              name = attr.file_name
+                              if '.' in name:
+                                  return '.' + name.split('.')[-1]
+                      mime_type = message.media.document.mime_type
+                      if 'video' in mime_type:
+                          return '.mp4'
+                      elif 'x-matroska' in mime_type:
+                          return '.mkv'
+                  return '.mp4'  # پیش‌فرض برای ویدیو
+              except:
+                  return '.mp4'
 
           async def main():
               print("=== Connecting to Telegram ===")
@@ -133,49 +169,55 @@ jobs:
                   os.makedirs(BASE_DIR, exist_ok=True)
                   new_count = 0
                   msg_count = 0
+                  video_count = 0
 
                   min_id = START_ID if START_ID > 0 else 0
                   print(f"Starting from ID: {min_id}")
+                  print("🎬 Only downloading VIDEO files...")
 
                   async for msg in client.iter_messages(entity, min_id=min_id, max_id=END_ID, reverse=True):
                       msg_count += 1
                       if msg_count % 100 == 0:
                           print(f"📊 Processed {msg_count} msgs...")
 
-                      if not msg.media:
+                      # فقط ویدیوها را پردازش کن
+                      if not is_video(msg):
                           continue
-
-                      # اصلاح: استفاده از msg.message به جای msg.caption
+                      
+                      video_count += 1
                       text = msg.text or msg.message or ""
                       folder, fname = extract_folder_and_filename(text)
 
+                      # اگر اسم فایل از متن استخراج نشد، از اسم اصلی استفاده کن
                       if not fname:
                           orig = getattr(msg.file, 'name', None)
                           if orig:
                               fname = os.path.basename(orig)
                           else:
-                              ext = msg.file.ext or '.bin'
-                              fname = f"{msg.id}{ext}"
+                              # دریافت پسوند مناسب
+                              ext = get_file_extension(msg)
+                              fname = f"video_{msg.id}{ext}"
 
                       folder_path = os.path.join(BASE_DIR, folder)
                       os.makedirs(folder_path, exist_ok=True)
 
-                      ext = msg.file.ext or ''
-                      if ext and not fname.endswith(ext):
+                      # اطمینان از داشتن پسوند
+                      ext = get_file_extension(msg)
+                      if not fname.endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv')):
                           fname += ext
 
                       path = os.path.join(folder_path, fname)
                       if not os.path.exists(path):
                           try:
                               await msg.download_media(file=path)
-                              print(f"✅ {folder}/{fname}")
+                              print(f"✅ [{video_count}] {folder}/{fname}")
                               new_count += 1
                           except Exception as e:
                               print(f"❌ Failed {msg.id}: {e}")
                       else:
                           print(f"⏩ Already exists: {fname}")
 
-                  print(f"\n🎉 Complete! Checked {msg_count} msgs, Downloaded {new_count} files")
+                  print(f"\n🎉 Complete! Total msgs: {msg_count}, Videos found: {video_count}, Downloaded: {new_count}")
 
           if __name__ == '__main__':
               try:
@@ -198,7 +240,7 @@ jobs:
           START_ID: ${{ github.event.inputs.start_message_id }}
           END_ID: ${{ github.event.inputs.end_message_id }}
         run: |
-          echo "=== Starting download ==="
+          echo "=== Starting download (Videos only) ==="
           python download_chat.py
           echo "=== Download finished ==="
 
