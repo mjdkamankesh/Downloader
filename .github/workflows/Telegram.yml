@@ -1,4 +1,4 @@
-name: 📥 Telegram Video Downloader (Fast Mode)
+name: 📥 Telegram Video Downloader (Debug)
 
 on:
   workflow_dispatch:
@@ -21,25 +21,24 @@ on:
         type: string
         default: 'me'
       start_id:
-        description: '🔢 شروع از Message ID (مثال: 553189)'
+        description: '🔢 شروع از Message ID'
         required: true
         type: string
         default: '553189'
       end_id:
-        description: '🔢 تا Message ID (مثال: 553820) - خالی = تا آخر'
+        description: '🔢 تا Message ID'
         required: false
         type: string
         default: ''
       zip_password:
-        description: '🔒 رمز فایل‌های زیپ (اختیاری)'
+        description: '🔒 رمز فایل‌های زیپ'
         required: false
         default: ''
-        type: string
 
 jobs:
   backup:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 60
     permissions:
       contents: write
 
@@ -59,12 +58,73 @@ jobs:
 
       - run: pip install telethon
 
-      - name: Create download script
+      - name: Test connection first
+        env:
+          API_ID: ${{ github.event.inputs.api_id }}
+          API_HASH: ${{ github.event.inputs.api_hash }}
+          STRING_SESSION: ${{ github.event.inputs.string_session }}
+        run: |
+          cat > test.py << 'EOF'
+          import asyncio
+          from telethon import TelegramClient
+          from telethon.sessions import StringSession
+          import os
+
+          async def main():
+              print("1️⃣ Testing connection...")
+              API_ID = int(os.environ['API_ID'])
+              API_HASH = os.environ['API_HASH']
+              STRING_SESSION = os.environ['STRING_SESSION']
+              
+              print("2️⃣ Creating client...")
+              client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+              
+              print("3️⃣ Connecting...")
+              await client.connect()
+              
+              print("4️⃣ Checking authorization...")
+              if not await client.is_user_authorized():
+                  print("❌ NOT authorized! StringSession may be invalid.")
+                  return
+              
+              print("5️⃣ Getting me...")
+              me = await client.get_me()
+              print(f"✅ Authorized as: {me.first_name} (ID: {me.id})")
+              
+              print("6️⃣ Getting saved messages...")
+              entity = await client.get_entity('me')
+              print(f"✅ Entity: {entity.title if hasattr(entity,'title') else entity.id}")
+              
+              print("7️⃣ Getting last message...")
+              last_msg = await client.get_messages(entity, limit=1)
+              if last_msg:
+                  print(f"✅ Last message ID: {last_msg[0].id}")
+              
+              print("🎉 Connection test passed!")
+              await client.disconnect()
+          
+          asyncio.run(main())
+          EOF
+          python test.py
+
+      - name: Download videos
+        env:
+          API_ID: ${{ github.event.inputs.api_id }}
+          API_HASH: ${{ github.event.inputs.api_hash }}
+          STRING_SESSION: ${{ github.event.inputs.string_session }}
+          CHAT: ${{ github.event.inputs.chat_target }}
+          START_ID: ${{ github.event.inputs.start_id }}
+          END_ID: ${{ github.event.inputs.end_id }}
         run: |
           cat > download.py << 'EOF'
           import os, re, asyncio
           from telethon import TelegramClient
           from telethon.sessions import StringSession
+          from telethon.errors import FloodWaitError
+
+          print("="*50)
+          print("STARTING DOWNLOADER")
+          print("="*50)
 
           API_ID = int(os.environ['API_ID'])
           API_HASH = os.environ['API_HASH']
@@ -74,16 +134,15 @@ jobs:
           END_ID_RAW = os.environ.get('END_ID', '')
           END_ID = int(END_ID_RAW) if END_ID_RAW and END_ID_RAW.strip() else None
 
+          print(f"API_ID: {API_ID}")
+          print(f"API_HASH: {API_HASH[:10]}...")
+          print(f"CHAT: {CHAT}")
+          print(f"START_ID: {START_ID}")
+          print(f"END_ID: {END_ID}")
+          print("")
+
           BASE = "saved_files"
           used_names = {}
-
-          print("="*50)
-          print("Telegram Video Downloader (Fast Mode)")
-          print("="*50)
-          print(f"Chat target: {CHAT}")
-          print(f"Message ID range: {START_ID} → {END_ID if END_ID else 'END'}")
-          print("="*50)
-          print("")
 
           def remove_emojis(t):
               if not t: return ""
@@ -134,25 +193,37 @@ jobs:
               return folder, fname
 
           async def main():
-              async with TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH) as client:
-                  me = await client.get_me()
-                  print(f"✅ Logged in as: {me.first_name}")
-                  entity = await client.get_entity(CHAT)
-                  print(f"🎯 Target: {entity.title if hasattr(entity,'title') else entity.id}")
-                  print("")
-                  
-                  os.makedirs(BASE, exist_ok=True)
-                  new = 0
-                  failed = 0
-                  checked = 0
-                  
-                  print(f"📊 Scanning messages from {START_ID} to {END_ID if END_ID else 'END'}...")
-                  print("")
-                  
+              print("Creating client...")
+              client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+              
+              print("Connecting...")
+              await client.connect()
+              
+              print("Checking authorization...")
+              if not await client.is_user_authorized():
+                  print("❌ Not authorized! Invalid StringSession.")
+                  return
+              
+              print("Getting me...")
+              me = await client.get_me()
+              print(f"✅ Logged in as: {me.first_name}")
+              
+              print("Getting entity...")
+              entity = await client.get_entity(CHAT)
+              print(f"✅ Target: {entity.title if hasattr(entity,'title') else entity.id}")
+              
+              os.makedirs(BASE, exist_ok=True)
+              new = 0
+              failed = 0
+              checked = 0
+              
+              print(f"\n📊 Scanning messages from {START_ID} to {END_ID if END_ID else 'END'}...\n")
+              
+              try:
                   async for msg in client.iter_messages(entity, min_id=START_ID, max_id=END_ID, reverse=True):
                       checked += 1
-                      if checked % 100 == 0:
-                          print(f"📊 Scanned {checked} messages | Downloaded: {new} | Failed: {failed}")
+                      if checked % 50 == 0:
+                          print(f"📊 Scanned {checked} messages | Downloaded: {new}")
                       
                       if not msg.video:
                           continue
@@ -177,131 +248,56 @@ jobs:
                       
                       if not os.path.exists(path):
                           try:
-                              print(f"⬇️ [{new+1}] Downloading: {folder}/{fname} (ID: {msg.id})")
+                              print(f"⬇️ [{new+1}] {folder}/{fname}")
                               await msg.download_media(file=path)
                               new += 1
-                              print(f"✅ [{new}] Done! ({fname})")
-                              
-                              # تایمر بین دانلودها - جلوگیری از هنگ
-                              await asyncio.sleep(2)
-                              
-                              # هر 10 فایل، 5 ثانیه استراحت
-                              if new % 10 == 0:
-                                  print("⏸️ Taking a 5 second break...")
-                                  await asyncio.sleep(5)
-                                  
+                              print(f"✅ Done! (ID: {msg.id})")
+                              await asyncio.sleep(1)
+                          except FloodWaitError as e:
+                              print(f"⏳ Flood wait: {e.seconds} seconds")
+                              await asyncio.sleep(e.seconds)
                           except Exception as e:
                               failed += 1
-                              print(f"❌ Failed msg {msg.id}: {str(e)[:80]}")
-                              await asyncio.sleep(1)
+                              print(f"❌ Failed: {str(e)[:80]}")
                       else:
                           print(f"⏩ Already exists: {fname}")
-                  
-                  print("")
-                  print("="*50)
-                  print(f"🎉 Complete!")
-                  print(f"📊 Messages scanned: {checked}")
-                  print(f"💾 Downloaded: {new}")
-                  print(f"❌ Failed: {failed}")
-                  print("="*50)
+              except Exception as e:
+                  print(f"❌ Fatal error: {e}")
+                  import traceback
+                  traceback.print_exc()
+              
+              print("\n" + "="*50)
+              print(f"🎉 Complete! Scanned: {checked}, Downloaded: {new}, Failed: {failed}")
+              print("="*50)
+              await client.disconnect()
 
           asyncio.run(main())
           EOF
+          python download.py
 
-      - name: Run download script
-        env:
-          API_ID: ${{ github.event.inputs.api_id }}
-          API_HASH: ${{ github.event.inputs.api_hash }}
-          STRING_SESSION: ${{ github.event.inputs.string_session }}
-          CHAT: ${{ github.event.inputs.chat_target }}
-          START_ID: ${{ github.event.inputs.start_id }}
-          END_ID: ${{ github.event.inputs.end_id }}
-        run: python download.py
-
-      - name: Zip and split folders
+      - name: Zip and push
         if: success()
-        env:
-          ZIP_PASSWORD: ${{ github.event.inputs.zip_password }}
         run: |
-          BASE_DIR="saved_files"
-          SPLIT_SIZE=45
-          REPO_OWNER="${{ github.repository_owner }}"
-          REPO_NAME="${{ github.event.repository.name }}"
-          BRANCH="${GITHUB_REF_NAME}"
-
-          if [ ! -d "$BASE_DIR" ]; then
-            echo "No saved_files directory. Exiting."
-            exit 0
-          fi
-
-          urlencode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"; }
-
-          for folder in "$BASE_DIR"/*/ ; do
-            [ -d "$folder" ] || continue
-            foldername=$(basename "$folder")
-            echo "📦 Zipping: $foldername"
-
-            cd "$BASE_DIR"
-            rm -f "${foldername}.zip" "${foldername}.z"* 2>/dev/null || true
-            if [ -n "$ZIP_PASSWORD" ]; then
-              zip -r -P "$ZIP_PASSWORD" -s ${SPLIT_SIZE}m "${foldername}.zip" "$foldername"
-            else
-              zip -r -s ${SPLIT_SIZE}m "${foldername}.zip" "$foldername"
-            fi
-            rm -rf "$foldername"
-            cd ../..
-            
-            # تایمر بین زیپ کردن پوشه‌ها
-            sleep 3
+          echo "Zipping files..."
+          for folder in saved_files/*/; do
+            name=$(basename "$folder")
+            cd saved_files
+            zip -r -s 45m "${name}.zip" "$name" && rm -rf "$name"
+            cd ..
+            sleep 2
           done
 
-      - name: Push to repository
-        if: success()
-        run: |
-          BRANCH="${GITHUB_REF_NAME}"
-
-          echo "=========================================="
-          echo "Pushing files to repository..."
-          echo "=========================================="
-
-          git fetch origin "$BRANCH"
-          git reset --hard origin/"$BRANCH" 2>/dev/null || true
-
-          mkdir -p saved_files
-          cp -r saved_files/* saved_files/ 2>/dev/null || true
-
-          git add -f saved_files/
-
-          if git diff --cached --quiet; then
-            echo "No changes to push"
-            exit 0
-          fi
-
-          git commit -m "Video backup $(date -u '+%Y-%m-%d %H:%M:%S') [skip ci]"
-
-          # تلاش برای پوش با تایمر و چند بار تکرار
-          MAX_RETRIES=10
-          RETRY=0
-          while [ $RETRY -lt $MAX_RETRIES ]; do
-            RETRY=$((RETRY + 1))
-            echo "Push attempt $RETRY/$MAX_RETRIES..."
-            
-            if timeout 180 git push origin HEAD:"$BRANCH" 2>&1; then
+          echo "Pushing to GitHub..."
+          git add saved_files/
+          git diff --cached --quiet || git commit -m "Video backup $(date -u '+%Y-%m-%d %H:%M:%S')"
+          
+          for i in 1 2 3 4 5; do
+            if git push origin HEAD:"${GITHUB_REF_NAME}"; then
               echo "✅ Push successful!"
-              exit 0
+              break
             else
-              echo "⚠️ Push failed, waiting 10 seconds before retry..."
+              echo "⚠️ Push failed, retry $i/5 in 10 seconds..."
               sleep 10
-              
-              # همگام‌سازی مجدد
-              git fetch origin "$BRANCH"
-              git reset --hard origin/"$BRANCH" 2>/dev/null || true
-              mkdir -p saved_files
-              cp -r saved_files/* saved_files/ 2>/dev/null || true
-              git add -f saved_files/
-              git commit -m "Video backup $(date -u '+%Y-%m-%d %H:%M:%S') [skip ci]" || true
+              git fetch origin && git rebase origin/"${GITHUB_REF_NAME}" || true
             fi
           done
-
-          echo "❌ Push failed after $MAX_RETRIES attempts"
-          exit 1
