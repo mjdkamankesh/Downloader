@@ -1,0 +1,205 @@
+
+name: ShizzleAI Video Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: "Maximum search pages to scan"
+        required: true
+        default: "30"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shizzleai-downloader
+  cancel-in-progress: false
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full ffmpeg git
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp playwright
+
+      - name: Install Chromium
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Prepare downloader
+        env:
+          MAX_PAGES: ${{ inputs.max_pages }}
+        run: |
+          if [ ! -f shizzleai_downloader.py ]; then
+            echo "ERROR: shizzleai_downloader.py not found!"
+            exit 1
+          fi
+
+          # GitHub Actions has no desktop display
+          sed -i 's/headless=False/headless=True/' shizzleai_downloader.py
+
+          # Allow page count to be controlled from workflow input
+          sed -i 's/MAX_PAGES = 30/MAX_PAGES = int(os.getenv("MAX_PAGES", "30"))/' shizzleai_downloader.py
+
+          mkdir -p ShizzleAI_Videos videos
+
+      - name: Download videos
+        env:
+          MAX_PAGES: ${{ inputs.max_pages }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u shizzleai_downloader.py
+
+      - name: Create password protected archives
+        env:
+          ZIP_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$ZIP_PASSWORD" ]; then
+            echo "ERROR: ZIP_PASSWORD secret is empty."
+            exit 1
+          fi
+
+          mkdir -p videos
+
+          shopt -s nullglob
+
+          FILES=(ShizzleAI_Videos/*)
+
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "No downloaded files found."
+            exit 0
+          fi
+
+          for FILE in "${FILES[@]}"; do
+
+            [ -f "$FILE" ] || continue
+
+            BASENAME=$(basename "$FILE")
+            EXT="${BASENAME##*.}"
+
+            # Skip non-video files
+            case "${EXT,,}" in
+              mp4|mkv|webm|mov|avi|m4v)
+                ;;
+              *)
+                echo "Skipping: $BASENAME"
+                continue
+                ;;
+            esac
+
+            NAME="${BASENAME%.*}"
+
+            # Create a safe folder name
+            SAFE_NAME=$(echo "$NAME" | \
+              sed 's/[^a-zA-Z0-9._-]/-/g' | \
+              sed 's/--*/-/g')
+
+            DEST="videos/$SAFE_NAME"
+
+            # Avoid overwriting an existing archive
+            if [ -d "$DEST" ]; then
+              SAFE_NAME="${SAFE_NAME}_$(date +%s)"
+              DEST="videos/$SAFE_NAME"
+            fi
+
+            mkdir -p "$DEST"
+
+            echo "Creating archive: $BASENAME"
+
+            7z a \
+              -tzip \
+              -v45m \
+              -p"$ZIP_PASSWORD" \
+              -mx=0 \
+              "$DEST/$SAFE_NAME.zip" \
+              "$FILE"
+
+            # Generate download links
+            {
+              echo "# $BASENAME"
+              echo
+              echo "Password protected archive"
+              echo
+              echo "Download ALL parts into the same folder."
+              echo
+              echo "| Part | Download |"
+              echo "|---|---|"
+
+              for PART in "$DEST"/*; do
+                [ -f "$PART" ] || continue
+
+                PART_NAME=$(basename "$PART")
+
+                ENCODED=$(python -c \
+                  "import urllib.parse; print(urllib.parse.quote('''$PART_NAME'''))")
+
+                URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/${DEST#videos/}/$ENCODED"
+
+                echo "| $PART_NAME | [Download]($URL) |"
+              done
+
+              echo
+              echo "## Extract"
+              echo
+              echo "Use 7-Zip or WinRAR to open the main ZIP file."
+              echo "Enter the ZIP password when requested."
+            } > "$DEST/README.md"
+
+            echo "Archive completed: $SAFE_NAME"
+
+          done
+
+      - name: Save download history
+        if: always()
+        run: |
+          mkdir -p videos
+
+          if [ -f downloaded.txt ]; then
+            echo "Download history found."
+          fi
+
+          if [ -f failed.txt ]; then
+            echo "Failed links:"
+            cat failed.txt
+          fi
+
+      - name: Commit and push
+        if: success()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add videos
+          git add downloaded.txt video_links.txt failed.txt 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "No new files to commit."
+            exit 0
+          fi
+
+          git commit -m "Add ShizzleAI video archives"
+
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+          echo "Upload completed successfully."
