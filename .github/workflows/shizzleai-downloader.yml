@@ -1,3 +1,4 @@
+
 name: ShizzleAI Downloader
 
 on:
@@ -10,7 +11,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: shizzleai-downloader
@@ -18,54 +19,62 @@ concurrency:
 
 jobs:
   download:
-    name: Run downloader
+    name: Download and archive videos
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
 
     env:
-      MAX_PAGES: ${{ github.event.inputs.max_pages || '30' }}
+      MAX_PAGES: ${{ inputs.max_pages || '30' }}
       PYTHONUNBUFFERED: "1"
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
+      # 1. Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # 2. Setup Python
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-          cache: "pip"
 
-      - name: Set up Chrome
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
-
-      - name: Verify Chrome
+      # 3. Install system dependencies
+      - name: Install system dependencies
         run: |
-          google-chrome --version || chromium --version || true
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full ffmpeg git
 
+      # 4. Install Python dependencies
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install yt-dlp playwright
+
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else
-            pip install selenium webdriver-manager
           fi
 
+      # 5. Install Chromium
+      - name: Install Chromium
+        run: |
+          python -m playwright install --with-deps chromium
+
+      # 6. Locate downloader
       - name: Locate downloader script
         id: locate
         run: |
           SCRIPT=""
+
           for candidate in \
             "shizzleai_downloader.py" \
             "scripts/shizzleai_downloader.py" \
             "src/shizzleai_downloader.py" \
             "downloader/shizzleai_downloader.py" \
             "app/shizzleai_downloader.py"; do
+
             if [ -f "$candidate" ]; then
               SCRIPT="$candidate"
               break
@@ -73,64 +82,204 @@ jobs:
           done
 
           if [ -z "$SCRIPT" ]; then
-            echo "ERROR: shizzleai_downloader.py not found!"
-            echo "--- files in repo root ---"
+            echo "ERROR: Downloader not found!"
+            echo "--- Repository root ---"
             ls -la
-            echo "--- searching whole repo ---"
-            find . -name "shizzleai_downloader.py" -not -path "./.git/*" || true
+            echo "--- Python files ---"
+            find . -type f -name "*.py" -not -path "./.git/*"
             exit 1
           fi
 
-          echo "Found script at: $SCRIPT"
+          echo "Found downloader: $SCRIPT"
           echo "script=$SCRIPT" >> "$GITHUB_OUTPUT"
 
+      # 7. Prepare downloader
       - name: Prepare downloader
         env:
           SCRIPT: ${{ steps.locate.outputs.script }}
         run: |
-          # GitHub Actions has no desktop display
+          set -e
+
           sed -i 's/headless=False/headless=True/g' "$SCRIPT"
 
-          # Allow page count to be controlled from workflow input
-          sed -i 's/MAX_PAGES = 30/MAX_PAGES = int(os.getenv("MAX_PAGES") or "30")/g' "$SCRIPT"
-
-          # Ensure `import os` exists (needed for os.getenv)
-          if ! grep -qE '^\s*import\s+os\b|^\s*from\s+os\s+import' "$SCRIPT"; then
-            sed -i '1i import os' "$SCRIPT"
-          fi
-
-          # Optional: force webdriver-manager if your script uses ChromeDriver
-          # (uncomment if you get driver errors)
-          # sed -i "s/from selenium import webdriver/from selenium import webdriver\nfrom webdriver_manager.chrome import ChromeDriverManager\nfrom selenium.webdriver.chrome.service import Service/" "$SCRIPT"
+          sed -i \
+            's/MAX_PAGES = 30/MAX_PAGES = int(os.getenv("MAX_PAGES") or "30")/g' \
+            "$SCRIPT"
 
           mkdir -p ShizzleAI_Videos videos
 
-          echo "--- sanity checks ---"
-          grep -n "headless" "$SCRIPT" | head -n 5 || true
-          grep -n "MAX_PAGES" "$SCRIPT" | head -n 5 || true
+          echo "--- Downloader settings ---"
+          grep -n "headless" "$SCRIPT" || true
+          grep -n "MAX_PAGES" "$SCRIPT" || true
 
-      - name: Run downloader
+      # 8. Run downloader
+      - name: Download videos
         env:
           SCRIPT: ${{ steps.locate.outputs.script }}
         run: |
-          python "$SCRIPT"
+          python -u "$SCRIPT"
 
-      - name: List produced files
+      # 9. Show downloaded files
+      - name: List downloaded files
         if: always()
         run: |
-          echo "--- ShizzleAI_Videos ---"
-          ls -la ShizzleAI_Videos 2>/dev/null || true
-          echo "--- videos ---"
-          ls -la videos 2>/dev/null || true
+          echo "--- Download directory ---"
+          ls -lah ShizzleAI_Videos/ 2>/dev/null || true
 
-      - name: Upload videos as artifact
+          echo "--- Download history ---"
+          cat downloaded.txt 2>/dev/null || true
+
+          echo "--- Failed downloads ---"
+          cat failed.txt 2>/dev/null || true
+
+      # 10. Create password protected ZIP archives
+      - name: Create password protected archives
+        if: success()
+        env:
+          ZIP_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$ZIP_PASSWORD" ]; then
+            echo "ERROR: ZIP_PASSWORD secret is empty!"
+            exit 1
+          fi
+
+          mkdir -p videos
+          shopt -s nullglob
+
+          FILES=(ShizzleAI_Videos/*)
+
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "No downloaded files found."
+            exit 0
+          fi
+
+          for FILE in "${FILES[@]}"; do
+
+            [ -f "$FILE" ] || continue
+
+            BASENAME=$(basename "$FILE")
+            EXT="${BASENAME##*.}"
+
+            # Only archive video files
+            case "${EXT,,}" in
+              mp4|mkv|webm|mov|avi|m4v)
+                ;;
+              *)
+                echo "Skipping non-video file: $BASENAME"
+                continue
+                ;;
+            esac
+
+            NAME="${BASENAME%.*}"
+
+            # Create safe folder name
+            SAFE_NAME=$(echo "$NAME" |
+              sed 's/[^a-zA-Z0-9._-]/-/g' |
+              sed 's/--*/-/g')
+
+            DEST="videos/$SAFE_NAME"
+
+            # Avoid duplicate archives
+            if [ -d "$DEST" ]; then
+              echo "Archive already exists, skipping: $BASENAME"
+              continue
+            fi
+
+            mkdir -p "$DEST"
+
+            echo "Creating archive: $BASENAME"
+
+            # ZIP with 45 MB volumes and password
+            7z a \
+              -tzip \
+              -v45m \
+              -p"$ZIP_PASSWORD" \
+              -mx=0 \
+              "$DEST/$SAFE_NAME.zip" \
+              "$FILE"
+
+            # Generate README with download links
+            {
+              echo "# $BASENAME"
+              echo
+              echo "Password protected ZIP archive."
+              echo
+              echo "Download ALL parts into the same folder."
+              echo
+              echo "## Download parts"
+              echo
+              echo "| Part | Download |"
+              echo "|---|---|"
+
+              PARTS=("$DEST/$SAFE_NAME.zip."*)
+
+              for PART in "${PARTS[@]}"; do
+                [ -f "$PART" ] || continue
+
+                PART_NAME=$(basename "$PART")
+
+                ENCODED=$(python -c \
+                  "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" \
+                  "$PART_NAME")
+
+                URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/${DEST}/${ENCODED}"
+
+                echo "| $PART_NAME | [Download]($URL) |"
+              done
+
+              echo
+              echo "## Extract"
+              echo
+              echo "Download all parts first."
+              echo
+              echo "Open the first volume (.001) using 7-Zip."
+              echo
+              echo "Enter the ZIP password when requested."
+
+            } > "$DEST/README.md"
+
+            echo "Archive completed: $SAFE_NAME"
+
+          done
+
+      # 11. Check archive output
+      - name: Check archive output
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shizzleai-videos-${{ github.run_number }}
-          path: |
-            ShizzleAI_Videos/
-            videos/
-          if-no-files-found: warn
-          retention-days: 7
-          compression-level: 6
+        run: |
+          echo "--- Archive folders ---"
+          find videos -maxdepth 3 -type f -print 2>/dev/null || true
+
+          echo "--- Repository changes ---"
+          git status --short
+
+      # 12. Commit and push
+      - name: Commit and push
+        if: success()
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add videos/
+
+          for FILE in downloaded.txt video_links.txt failed.txt; do
+            if [ -f "$FILE" ]; then
+              git add "$FILE"
+            fi
+          done
+
+          if git diff --cached --quiet; then
+            echo "No new files to commit."
+            exit 0
+          fi
+
+          git commit -m "Add ShizzleAI video archives"
+
+          git pull --rebase origin "$GITHUB_REF_NAME"
+
+          git push origin "HEAD:$GITHUB_REF_NAME"
+
+          echo "Upload completed successfully."
