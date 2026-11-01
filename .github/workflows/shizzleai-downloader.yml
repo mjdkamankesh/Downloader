@@ -38,14 +38,13 @@ jobs:
           fetch-depth: 0
 
       - name: Mask password
-        shell: bash
         run: echo "::add-mask::$ZIP_PASSWORD"
 
       # ---------------------------------------
       # CLOUDFLARE WARP
       # ---------------------------------------
 
-      - name: Install Cloudflare WARP
+      - name: Install and connect Cloudflare WARP
         shell: bash
         run: |
           set -e
@@ -62,17 +61,18 @@ jobs:
 
           sudo systemctl enable --now warp-svc
 
+          echo "WARP CLI version:"
+          warp-cli --version
+
           echo "Registering WARP..."
 
-          warp-cli registration new --accept-tos
+          sudo warp-cli --accept-tos registration new
 
           echo "Setting WARP mode..."
+          sudo warp-cli mode warp+doh
 
-          warp-cli mode warp+doh
-
-          echo "Connecting to WARP..."
-
-          warp-cli connect
+          echo "Connecting WARP..."
+          sudo warp-cli connect
 
           echo "Waiting for WARP connection..."
 
@@ -81,7 +81,7 @@ jobs:
           for i in $(seq 1 30); do
             if curl -fsS --max-time 10 \
               https://www.cloudflare.com/cdn-cgi/trace |
-              grep -q "warp=on"; then
+              grep -q "^warp=on$"; then
               CONNECTED=1
               break
             fi
@@ -90,8 +90,8 @@ jobs:
           done
 
           if [ "$CONNECTED" -ne 1 ]; then
-            echo "WARP connection could not be verified."
-            warp-cli status || true
+            echo "WARP connection verification failed."
+            sudo warp-cli status || true
             exit 1
           fi
 
@@ -479,7 +479,7 @@ jobs:
           python -u /tmp/shizzleai_downloader.py
 
       # ---------------------------------------
-      # DEBUG ARTIFACTS
+      # DEBUG FILES
       # ---------------------------------------
 
       - name: Upload diagnostic files
@@ -501,7 +501,7 @@ jobs:
       - name: Disconnect WARP
         if: always()
         run: |
-          warp-cli disconnect || true
+          sudo warp-cli disconnect || true
 
       # ---------------------------------------
       # CREATE ENCRYPTED SPLIT ZIP FILES
@@ -572,7 +572,7 @@ jobs:
           done
 
       # ---------------------------------------
-      # UPLOAD DOWNLOADED VIDEOS AS ARTIFACT
+      # UPLOAD VIDEO ARTIFACT
       # ---------------------------------------
 
       - name: Upload video files
