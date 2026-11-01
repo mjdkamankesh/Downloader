@@ -32,20 +32,17 @@ jobs:
       PYTHONUNBUFFERED: "1"
 
     steps:
-      # ---------------------------------------
-      # CHECKOUT
-      # ---------------------------------------
-
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Mask password
+        shell: bash
         run: echo "::add-mask::$ZIP_PASSWORD"
 
       # ---------------------------------------
-      # INSTALL CLOUDFLARE WARP
+      # CLOUDFLARE WARP
       # ---------------------------------------
 
       - name: Install Cloudflare WARP
@@ -65,9 +62,16 @@ jobs:
 
           sudo systemctl enable --now warp-svc
 
-          warp-cli --accept-tos registration new
+          echo "Registering WARP..."
+
+          warp-cli registration new --accept-tos
+
+          echo "Setting WARP mode..."
 
           warp-cli mode warp+doh
+
+          echo "Connecting to WARP..."
+
           warp-cli connect
 
           echo "Waiting for WARP connection..."
@@ -78,7 +82,6 @@ jobs:
             if curl -fsS --max-time 10 \
               https://www.cloudflare.com/cdn-cgi/trace |
               grep -q "warp=on"; then
-
               CONNECTED=1
               break
             fi
@@ -94,6 +97,9 @@ jobs:
 
           echo "Cloudflare WARP is connected."
 
+          curl -fsS https://www.cloudflare.com/cdn-cgi/trace |
+            grep -E "^(ip|warp|gateway|colo)=" || true
+
       # ---------------------------------------
       # PYTHON
       # ---------------------------------------
@@ -104,7 +110,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -e
+
           sudo apt-get update
           sudo apt-get install -y ffmpeg p7zip-full
 
@@ -114,7 +123,7 @@ jobs:
           python -m playwright install --with-deps chromium
 
       # ---------------------------------------
-      # EMBEDDED DOWNLOADER
+      # DOWNLOADER
       # ---------------------------------------
 
       - name: Run ShizzleAI downloader
@@ -123,7 +132,6 @@ jobs:
           cat > /tmp/shizzleai_downloader.py <<'PYTHON'
           import os
           import re
-          import json
           import asyncio
           from urllib.parse import urljoin, urlparse, parse_qs
 
@@ -147,23 +155,23 @@ jobs:
           def valid_video_url(url):
               try:
                   parsed = urlparse(url)
-
                   host = (parsed.hostname or "").lower()
 
                   return (
-                      host == "rule34gen.com"
-                      or host.endswith(".rule34gen.com")
-                  ) and re.search(
-                      r"/video/\d+/?",
-                      parsed.path,
-                      re.IGNORECASE
-                  ) is not None
-
+                      (
+                          host == "rule34gen.com"
+                          or host.endswith(".rule34gen.com")
+                      )
+                      and re.search(
+                          r"/video/\d+/?",
+                          parsed.path,
+                          re.IGNORECASE
+                      ) is not None
+                  )
               except Exception:
                   return False
 
           async def extract_links(page):
-              # Try multiple selectors instead of relying on one CSS class.
               selectors = [
                   "a.th.js-open-popup[href]",
                   "a[href*='/video/']",
@@ -185,7 +193,6 @@ jobs:
                   except Exception as error:
                       print(f"Selector error ({selector}): {error}")
 
-              # Also inspect all anchors as a fallback.
               try:
                   anchors = await page.locator("a[href]").evaluate_all(
                       "(els) => els.map(e => e.href)"
@@ -293,7 +300,9 @@ jobs:
 
                       visited.add(current_url)
 
-                      print(f"\nScanning page {number}: {current_url}")
+                      print(
+                          f"\nScanning page {number}: {current_url}"
+                      )
 
                       try:
                           response = await page.goto(
@@ -317,7 +326,6 @@ jobs:
                           print(f"Found {len(links)} video links.")
 
                           if number == 1:
-                              # Save diagnostics for the first page.
                               with open(
                                   "debug_page.html",
                                   "w",
@@ -361,7 +369,6 @@ jobs:
 
                   await browser.close()
 
-              # Preserve previous links and append new ones.
               previous = []
 
               if os.path.exists(LINKS_FILE):
@@ -371,8 +378,7 @@ jobs:
                       encoding="utf-8"
                   ) as f:
                       previous = [
-                          x.strip() for x in f
-                          if x.strip()
+                          x.strip() for x in f if x.strip()
                       ]
 
               combined = list(dict.fromkeys(previous + all_links))
@@ -419,8 +425,7 @@ jobs:
                       encoding="utf-8"
                   ) as f:
                       failed = [
-                          x.strip() for x in f
-                          if x.strip()
+                          x.strip() for x in f if x.strip()
                       ]
 
               failed = list(dict.fromkeys(failed))
@@ -435,8 +440,8 @@ jobs:
                           result = ydl.download([link])
 
                           if result != 0:
-                              failed.append(link)
-
+                              if link not in failed:
+                                  failed.append(link)
                           else:
                               failed = [
                                   x for x in failed if x != link
@@ -474,7 +479,7 @@ jobs:
           python -u /tmp/shizzleai_downloader.py
 
       # ---------------------------------------
-      # SAVE DEBUG FILES
+      # DEBUG ARTIFACTS
       # ---------------------------------------
 
       - name: Upload diagnostic files
@@ -527,7 +532,8 @@ jobs:
 
             DEST="videos/$SAFE_NAME"
 
-            if [ -f "$DEST/README.md" ]; then
+            if [ -f "$DEST/README.md" ] &&
+               compgen -G "$DEST/*.zip" > /dev/null; then
               echo "Already archived: $SAFE_NAME"
               continue
             fi
@@ -556,6 +562,7 @@ jobs:
               echo ""
               echo "## Archive parts"
               echo ""
+
               for PART in "$DEST"/*.z[0-9]* "$DEST"/*.zip; do
                 [ -f "$PART" ] || continue
                 echo "- $(basename "$PART")"
@@ -578,7 +585,7 @@ jobs:
           retention-days: 7
 
       # ---------------------------------------
-      # COMMIT WITHOUT FORCE PUSH
+      # COMMIT AND PUSH
       # ---------------------------------------
 
       - name: Commit and push
