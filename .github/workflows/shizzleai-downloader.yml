@@ -1,4 +1,3 @@
-
 name: ShizzleAI Downloader
 
 on:
@@ -162,7 +161,6 @@ jobs:
             BASENAME=$(basename "$FILE")
             EXT="${BASENAME##*.}"
 
-            # Only archive video files
             case "${EXT,,}" in
               mp4|mkv|webm|mov|avi|m4v)
                 ;;
@@ -174,14 +172,12 @@ jobs:
 
             NAME="${BASENAME%.*}"
 
-            # Create safe folder name
             SAFE_NAME=$(echo "$NAME" |
               sed 's/[^a-zA-Z0-9._-]/-/g' |
               sed 's/--*/-/g')
 
             DEST="videos/$SAFE_NAME"
 
-            # Avoid duplicate archives
             if [ -d "$DEST" ]; then
               echo "Archive already exists, skipping: $BASENAME"
               continue
@@ -191,7 +187,6 @@ jobs:
 
             echo "Creating archive: $BASENAME"
 
-            # ZIP with 45 MB volumes and password
             7z a \
               -tzip \
               -v45m \
@@ -200,7 +195,6 @@ jobs:
               "$DEST/$SAFE_NAME.zip" \
               "$FILE"
 
-            # Generate README with download links
             {
               echo "# $BASENAME"
               echo
