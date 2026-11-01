@@ -1,12 +1,17 @@
-name: ShizzleAI Downloader
+
+name: ShizzleAI Video Downloader
 
 on:
   workflow_dispatch:
     inputs:
       max_pages:
-        description: "Maximum number of pages to crawl"
-        required: false
-        default: "30"
+        description: "Number of pages to scan"
+        required: true
+        default: "6"
+        type: string
+      zip_password:
+        description: "Password for encrypted ZIP archives"
+        required: true
         type: string
 
 permissions:
@@ -18,246 +23,319 @@ concurrency:
 
 jobs:
   download:
-    name: Download and archive videos
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     env:
-      MAX_PAGES: ${{ inputs.max_pages || '30' }}
+      MAX_PAGES: ${{ inputs.max_pages }}
+      ZIP_PASSWORD: ${{ inputs.zip_password }}
       PYTHONUNBUFFERED: "1"
 
     steps:
-
-      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      # 2. Setup Python
-      - name: Set up Python
+      - name: Mask ZIP password
+        shell: bash
+        run: |
+          echo "::add-mask::$ZIP_PASSWORD"
+
+      - name: Setup Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      # 3. Install system dependencies
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y p7zip-full ffmpeg git
-
-      # 4. Install Python dependencies
-      - name: Install Python dependencies
-        run: |
+          sudo apt-get install -y p7zip-full ffmpeg
           python -m pip install --upgrade pip
-          pip install yt-dlp playwright
-
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-
-      # 5. Install Chromium
-      - name: Install Chromium
-        run: |
+          pip install -U yt-dlp playwright
           python -m playwright install --with-deps chromium
 
-      # 6. Locate downloader
-      - name: Locate downloader script
-        id: locate
+      # ----------------------------------------
+      # Embedded Python downloader
+      # ----------------------------------------
+
+      - name: Download ShizzleAI videos
+        shell: bash
         run: |
-          SCRIPT=""
+          cat > /tmp/shizzleai_downloader.py <<'PYTHON'
+          import os
+          import re
+          import asyncio
+          from urllib.parse import urljoin, urlparse, parse_qs
 
-          for candidate in \
-            "shizzleai_downloader.py" \
-            "scripts/shizzleai_downloader.py" \
-            "src/shizzleai_downloader.py" \
-            "downloader/shizzleai_downloader.py" \
-            "app/shizzleai_downloader.py"; do
+          from playwright.async_api import async_playwright
+          from yt_dlp import YoutubeDL
+          from yt_dlp.utils import DownloadError
 
-            if [ -f "$candidate" ]; then
-              SCRIPT="$candidate"
-              break
-            fi
-          done
+          START_URL = "https://rule34gen.com/search/shizzleai-/?sort_by=post_date"
 
-          if [ -z "$SCRIPT" ]; then
-            echo "ERROR: Downloader not found!"
-            echo "--- Repository root ---"
-            ls -la
-            echo "--- Python files ---"
-            find . -type f -name "*.py" -not -path "./.git/*"
-            exit 1
-          fi
+          OUTPUT_DIR = "ShizzleAI_Videos"
+          ARCHIVE_FILE = "downloaded.txt"
+          FAILED_FILE = "failed.txt"
+          LINKS_FILE = "video_links.txt"
 
-          echo "Found downloader: $SCRIPT"
-          echo "script=$SCRIPT" >> "$GITHUB_OUTPUT"
+          MAX_PAGES = max(1, int(os.getenv("MAX_PAGES", "6")))
 
-      # 7. Prepare downloader
-      - name: Prepare downloader
-        env:
-          SCRIPT: ${{ steps.locate.outputs.script }}
+          os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+          def valid_video_url(url):
+              parsed = urlparse(url)
+              return (
+                  parsed.hostname == "rule34gen.com"
+                  and re.search(r"/video/\d+/", parsed.path) is not None
+              )
+
+          async def get_video_links(page):
+              elements = await page.locator("a.th.js-open-popup[href]").evaluate_all(
+                  "(els) => els.map(e => e.href)"
+              )
+
+              links = []
+
+              for link in elements:
+                  if valid_video_url(link) and link not in links:
+                      links.append(link)
+
+              return links
+
+          def current_page_number(url):
+              parsed = urlparse(url)
+              values = parse_qs(parsed.query).get("page", ["1"])
+
+              try:
+                  return int(values[0])
+              except (ValueError, TypeError):
+                  return 1
+
+          async def get_next_page(page, current_url):
+              # First try rel=next
+              next_link = page.locator('a[rel="next"]')
+
+              if await next_link.count():
+                  href = await next_link.first.get_attribute("href")
+                  if href:
+                      return urljoin(current_url, href)
+
+              # Try common Next button labels
+              anchors = await page.locator("a[href]").evaluate_all("""
+                  els => els.map(a => ({
+                      href: a.getAttribute('href'),
+                      text: (a.innerText || a.getAttribute('aria-label') || '').trim()
+                  }))
+              """)
+
+              for item in anchors:
+                  label = item["text"].lower()
+
+                  if (
+                      label in ("next", "next page", "›", "»", "→", ">")
+                      or "next page" in label
+                  ):
+                      if item["href"]:
+                          return urljoin(current_url, item["href"])
+
+              # Try numeric pagination
+              current_number = current_page_number(current_url)
+              candidates = []
+
+              for item in anchors:
+                  label = item["text"].strip()
+
+                  if label.isdigit() and item["href"]:
+                      number = int(label)
+
+                      if number > current_number:
+                          candidates.append((number, item["href"]))
+
+              if candidates:
+                  candidates.sort(key=lambda x: x[0])
+                  return urljoin(current_url, candidates[0][1])
+
+              return None
+
+          async def collect_links():
+              all_links = []
+              visited_pages = set()
+
+              async with async_playwright() as p:
+                  browser = await p.chromium.launch(headless=True)
+
+                  page = await browser.new_page()
+                  page.set_default_timeout(30000)
+
+                  current_url = START_URL
+
+                  for page_number in range(1, MAX_PAGES + 1):
+                      if not current_url or current_url in visited_pages:
+                          break
+
+                      visited_pages.add(current_url)
+
+                      print(f"\nScanning page {page_number}: {current_url}")
+
+                      try:
+                          await page.goto(
+                              current_url,
+                              wait_until="domcontentloaded",
+                              timeout=60000
+                          )
+
+                          await page.wait_for_timeout(2000)
+
+                          links = await get_video_links(page)
+
+                          print(f"Found {len(links)} videos on this page.")
+
+                          for link in links:
+                              if link not in all_links:
+                                  all_links.append(link)
+
+                          next_url = await get_next_page(page, current_url)
+
+                          if not next_url or next_url in visited_pages:
+                              break
+
+                          current_url = next_url
+
+                      except Exception as error:
+                          print(f"Page error: {error}")
+                          break
+
+                  await browser.close()
+
+              with open(LINKS_FILE, "w", encoding="utf-8") as file:
+                  file.write("\n".join(all_links))
+
+              print(f"\nTotal unique video links: {len(all_links)}")
+
+              return all_links
+
+          def download_videos(links):
+              options = {
+                  "format": "bestvideo*+bestaudio/best",
+                  "merge_output_format": "mp4",
+                  "outtmpl": os.path.join(
+                      OUTPUT_DIR,
+                      "%(title).120B_%(id)s.%(ext)s"
+                  ),
+                  "download_archive": ARCHIVE_FILE,
+                  "continuedl": True,
+                  "retries": 10,
+                  "fragment_retries": 10,
+                  "ignoreerrors": False,
+                  "noplaylist": True,
+                  "quiet": False,
+                  "no_warnings": False,
+                  "overwrites": False,
+              }
+
+              failed = []
+
+              with YoutubeDL(options) as ydl:
+                  for index, link in enumerate(links, start=1):
+                      print(f"\nDownloading {index}/{len(links)}: {link}")
+
+                      try:
+                          ydl.download([link])
+                      except DownloadError as error:
+                          print(f"Download failed: {error}")
+                          failed.append(link)
+                      except Exception as error:
+                          print(f"Unexpected error: {error}")
+                          failed.append(link)
+
+              with open(FAILED_FILE, "w", encoding="utf-8") as file:
+                  file.write("\n".join(failed))
+
+              print(f"\nFailed downloads: {len(failed)}")
+
+          async def main():
+              links = await collect_links()
+
+              if not links:
+                  print("No video links found.")
+                  return
+
+              download_videos(links)
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          PYTHON
+
+          python -u /tmp/shizzleai_downloader.py
+
+      # ----------------------------------------
+      # Create encrypted ZIP archives
+      # ----------------------------------------
+
+      - name: Create password protected archives
+        shell: bash
         run: |
           set -e
 
-          sed -i 's/headless=False/headless=True/g' "$SCRIPT"
-
-          sed -i \
-            's/MAX_PAGES = 30/MAX_PAGES = int(os.getenv("MAX_PAGES") or "30")/g' \
-            "$SCRIPT"
-
-          mkdir -p ShizzleAI_Videos videos
-
-          echo "--- Downloader settings ---"
-          grep -n "headless" "$SCRIPT" || true
-          grep -n "MAX_PAGES" "$SCRIPT" || true
-
-      # 8. Run downloader
-      - name: Download videos
-        env:
-          SCRIPT: ${{ steps.locate.outputs.script }}
-        run: |
-          python -u "$SCRIPT"
-
-      # 9. Show downloaded files
-      - name: List downloaded files
-        if: always()
-        run: |
-          echo "--- Download directory ---"
-          ls -lah ShizzleAI_Videos/ 2>/dev/null || true
-
-          echo "--- Download history ---"
-          cat downloaded.txt 2>/dev/null || true
-
-          echo "--- Failed downloads ---"
-          cat failed.txt 2>/dev/null || true
-
-      # 10. Create password protected ZIP archives
-      - name: Create password protected archives
-        if: success()
-        env:
-          ZIP_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "$ZIP_PASSWORD" ]; then
-            echo "ERROR: ZIP_PASSWORD secret is empty!"
-            exit 1
-          fi
-
           mkdir -p videos
+
           shopt -s nullglob
 
-          FILES=(ShizzleAI_Videos/*)
-
-          if [ ${#FILES[@]} -eq 0 ]; then
-            echo "No downloaded files found."
-            exit 0
-          fi
-
-          for FILE in "${FILES[@]}"; do
+          for FILE in ShizzleAI_Videos/*; do
 
             [ -f "$FILE" ] || continue
 
-            BASENAME=$(basename "$FILE")
-            EXT="${BASENAME##*.}"
-
-            case "${EXT,,}" in
-              mp4|mkv|webm|mov|avi|m4v)
+            case "${FILE,,}" in
+              *.mp4|*.mkv|*.webm|*.mov|*.avi|*.m4v)
                 ;;
               *)
-                echo "Skipping non-video file: $BASENAME"
                 continue
                 ;;
             esac
 
-            NAME="${BASENAME%.*}"
-
-            SAFE_NAME=$(echo "$NAME" |
-              sed 's/[^a-zA-Z0-9._-]/-/g' |
-              sed 's/--*/-/g')
+            BASENAME=$(basename "$FILE")
+            SAFE_NAME=$(echo "$BASENAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
 
             DEST="videos/$SAFE_NAME"
 
-            if [ -d "$DEST" ]; then
-              echo "Archive already exists, skipping: $BASENAME"
+            if compgen -G "$DEST.zip.*" > /dev/null; then
+              echo "Already archived: $SAFE_NAME"
               continue
             fi
 
-            mkdir -p "$DEST"
-
-            echo "Creating archive: $BASENAME"
+            echo "Creating encrypted archive: $SAFE_NAME"
 
             7z a \
               -tzip \
               -v45m \
               -p"$ZIP_PASSWORD" \
               -mx=0 \
-              "$DEST/$SAFE_NAME.zip" \
+              "$DEST.zip" \
               "$FILE"
-
-            {
-              echo "# $BASENAME"
-              echo
-              echo "Password protected ZIP archive."
-              echo
-              echo "Download ALL parts into the same folder."
-              echo
-              echo "## Download parts"
-              echo
-              echo "| Part | Download |"
-              echo "|---|---|"
-
-              PARTS=("$DEST/$SAFE_NAME.zip."*)
-
-              for PART in "${PARTS[@]}"; do
-                [ -f "$PART" ] || continue
-
-                PART_NAME=$(basename "$PART")
-
-                ENCODED=$(python -c \
-                  "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" \
-                  "$PART_NAME")
-
-                URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/${DEST}/${ENCODED}"
-
-                echo "| $PART_NAME | [Download]($URL) |"
-              done
-
-              echo
-              echo "## Extract"
-              echo
-              echo "Download all parts first."
-              echo
-              echo "Open the first volume (.001) using 7-Zip."
-              echo
-              echo "Enter the ZIP password when requested."
-
-            } > "$DEST/README.md"
-
-            echo "Archive completed: $SAFE_NAME"
 
           done
 
-      # 11. Check archive output
-      - name: Check archive output
-        if: always()
-        run: |
-          echo "--- Archive folders ---"
-          find videos -maxdepth 3 -type f -print 2>/dev/null || true
+          echo "Archive creation completed."
 
-          echo "--- Repository changes ---"
-          git status --short
+      # ----------------------------------------
+      # Update repository
+      # ----------------------------------------
 
-      # 12. Commit and push
       - name: Commit and push
         if: success()
+        shell: bash
         run: |
           set -e
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add videos/
+          # Rebase before staging new files
+          git fetch origin "$GITHUB_REF_NAME"
+          git rebase "origin/$GITHUB_REF_NAME"
+
+          git add -A videos/
 
           for FILE in downloaded.txt video_links.txt failed.txt; do
             if [ -f "$FILE" ]; then
@@ -271,8 +349,6 @@ jobs:
           fi
 
           git commit -m "Add ShizzleAI video archives"
-
-          git pull --rebase origin "$GITHUB_REF_NAME"
 
           git push origin "HEAD:$GITHUB_REF_NAME"
 
