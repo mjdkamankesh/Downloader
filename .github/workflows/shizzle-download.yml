@@ -1,4 +1,3 @@
-```yaml
 name: ShizzleAI Page Downloader
 
 on:
@@ -293,4 +292,4 @@ jobs:
             page_links.txt
           if-no-files-found: ignore
           retention-days: 7
-```
+
