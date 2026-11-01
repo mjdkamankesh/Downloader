@@ -1,0 +1,254 @@
+name: ShizzleAI Pages 2-6 Queue
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_number:
+        description: "صفحه موردنظر"
+        required: true
+        type: choice
+        options: ["2", "3", "4", "5", "6"]
+      zip_password:
+        description: "رمز ZIP"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# صف مستقل از Workflow صفحه ۱
+concurrency:
+  group: shizzleai-pages-2-6-queue
+  queue: max
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PAGE_NUMBER: ${{ inputs.page_number }}
+      ZIP_PASSWORD: ${{ inputs.zip_password }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg p7zip-full zip unzip
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python -m pip install --upgrade pip
+          pip install playwright yt-dlp pyzipper
+          python -m playwright install --with-deps chromium
+
+      - name: Prepare folders
+        run: |
+          mkdir -p "ShizzleAI_Videos/Page_${PAGE_NUMBER}" temp_downloads debug
+          : > failed.txt
+
+      - name: Extract page video links
+        run: |
+          cat > extract_links.py <<'PY'
+          import asyncio
+          import os
+          from pathlib import Path
+          from playwright.async_api import async_playwright
+
+          page_number = int(os.environ["PAGE_NUMBER"])
+          url = (
+              "https://rule34gen.com/search/shizzleai-/"
+              f"?sort_by=post_date&page={page_number}"
+          )
+
+          async def main():
+              async with async_playwright() as p:
+                  browser = await p.chromium.launch(headless=True)
+                  page = await browser.new_page()
+                  await page.goto(url, wait_until="domcontentloaded", timeout=120000)
+                  await page.wait_for_timeout(10000)
+                  await page.screenshot(
+                      path=f"debug/page_{page_number}.png", full_page=True
+                  )
+                  Path(f"debug/page_{page_number}.html").write_text(
+                      await page.content(), encoding="utf-8"
+                  )
+
+                  links = await page.locator("a[href*='/video/']").evaluate_all(
+                      """els => els.map(a => a.href)
+                         .filter(h => /\\/video\\/\\d+\\//.test(h))"""
+                  )
+                  links = list(dict.fromkeys(links))
+                  Path("page_links.txt").write_text(
+                      "\\n".join(links), encoding="utf-8"
+                  )
+                  print(f"PAGE: {page_number}")
+                  print(f"TOTAL VIDEOS: {len(links)}")
+                  await browser.close()
+
+          asyncio.run(main())
+          PY
+          python extract_links.py
+
+          COUNT=$(grep -c . page_links.txt || true)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::هیچ لینکی پیدا نشد؛ فایل‌های debug را بررسی کن."
+            exit 1
+          fi
+          echo "Extracted $COUNT links for page $PAGE_NUMBER."
+          if [ "$PAGE_NUMBER" -lt 6 ] && [ "$COUNT" -ne 24 ]; then
+            echo "::warning::انتظار 24 لینک بود، اما $COUNT لینک پیدا شد."
+          fi
+          if [ "$PAGE_NUMBER" -eq 6 ] && [ "$COUNT" -ne 14 ]; then
+            echo "::warning::انتظار 14 لینک بود، اما $COUNT لینک پیدا شد."
+          fi
+
+      - name: Download videos
+        run: |
+          TOTAL=$(grep -c . page_links.txt || true)
+          CURRENT=0
+          SUCCESS=0
+          FAILED=0
+
+          while IFS= read -r URL; do
+            [ -n "$URL" ] || continue
+            CURRENT=$((CURRENT + 1))
+            VIDEO_ID=$(echo "$URL" | sed -nE 's#^.*/video/([0-9]+)/.*#\1#p')
+
+            echo ""
+            echo "=========================================="
+            echo "PAGE: $PAGE_NUMBER"
+            echo "VIDEO: $CURRENT/$TOTAL"
+            echo "SUCCESS: $SUCCESS"
+            echo "FAILED: $FAILED"
+            echo "REMAINING: $((TOTAL - CURRENT))"
+            echo "VIDEO ID: $VIDEO_ID"
+            echo "URL: $URL"
+            echo "=========================================="
+
+            if yt-dlp \
+              --no-overwrites \
+              --retries 10 \
+              --fragment-retries 10 \
+              --file-access-retries 10 \
+              --socket-timeout 60 \
+              --continue \
+              -N 4 \
+              -f "bestvideo+bestaudio/best" \
+              --merge-output-format mp4 \
+              -o "temp_downloads/%(title).150B_%(id)s.%(ext)s" \
+              "$URL"; then
+              SUCCESS=$((SUCCESS + 1))
+            else
+              FAILED=$((FAILED + 1))
+              echo "$URL" >> failed.txt
+              echo "DOWNLOAD FAILED: $URL"
+            fi
+          done < page_links.txt
+
+          echo "FINAL: TOTAL=$TOTAL SUCCESS=$SUCCESS FAILED=$FAILED"
+
+      - name: Create AES-256 ZIP and split into 45MB parts
+        if: always()
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import pyzipper
+
+          page = os.environ["PAGE_NUMBER"]
+          password = os.environ["ZIP_PASSWORD"].encode("utf-8")
+          source = Path("temp_downloads")
+          target_dir = Path(f"ShizzleAI_Videos/Page_{page}")
+          target_dir.mkdir(parents=True, exist_ok=True)
+          zip_path = Path(f"/tmp/ShizzleAI_Page_{page}.zip")
+
+          files = sorted(p for p in source.rglob("*") if p.is_file())
+          if not files:
+              print("No downloaded videos; ZIP skipped.")
+              raise SystemExit(0)
+
+          with pyzipper.AESZipFile(
+              zip_path,
+              "w",
+              compression=pyzipper.ZIP_STORED,
+              encryption=pyzipper.WZ_AES,
+          ) as archive:
+              archive.setpassword(password)
+              archive.setencryption(pyzipper.WZ_AES, nbits=256)
+              for file in files:
+                  archive.write(file, arcname=file.name)
+
+          part_size = 45 * 1024 * 1024
+          prefix = target_dir / f"ShizzleAI_Page_{page}.part-"
+          with zip_path.open("rb") as source_file:
+              index = 0
+              while True:
+                  chunk = source_file.read(part_size)
+                  if not chunk:
+                      break
+                  part_path = Path(f"{prefix}{index:03d}")
+                  part_path.write_bytes(chunk)
+                  print(f"Created {part_path} ({len(chunk)} bytes)")
+                  index += 1
+
+          zip_path.unlink(missing_ok=True)
+          PY
+
+      - name: Save reports
+        if: always()
+        run: |
+          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          cp failed.txt "$PAGE_DIR/failed.txt" 2>/dev/null || true
+          cp page_links.txt "$PAGE_DIR/page_links.txt" 2>/dev/null || true
+          cat > "$PAGE_DIR/README.txt" <<EOF
+          ShizzleAI Page ${PAGE_NUMBER}
+          ZIP encryption: AES-256
+          ZIP split size: 45 MiB per part
+          Rebuild:
+          cat ShizzleAI_Page_${PAGE_NUMBER}.part-* > ShizzleAI_Page_${PAGE_NUMBER}.zip
+          EOF
+
+      - name: Commit and push
+        if: always()
+        run: |
+          git add -f "ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Add ShizzleAI page ${PAGE_NUMBER} [skip ci]"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "${GITHUB_REF_NAME}"
+            git rebase "origin/${GITHUB_REF_NAME}" || {
+              git rebase --abort
+              echo "::error::Rebase conflict."
+              exit 1
+            }
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "Push successful."
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "::error::Push failed after 5 attempts."
+          exit 1
+
+      - name: Upload debug files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shizzleai-page-${{ inputs.page_number }}-debug-${{ github.run_number }}
+          path: |
+            debug/
+            page_links.txt
+            failed.txt
+          if-no-files-found: ignore
+          retention-days: 7
