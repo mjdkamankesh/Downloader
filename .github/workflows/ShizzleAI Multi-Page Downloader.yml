@@ -79,39 +79,31 @@ jobs:
       # --------------------------------------------------
       # Scrape all pagination pages
       # --------------------------------------------------
-      - name: Extract video links from all pages
+            - name: Extract video links from all pages
         shell: bash
         run: |
           cat > extract_links.py <<'PY'
           import asyncio
+          import os
           import re
-          import sys
-          from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
+          from urllib.parse import urlparse
 
           from playwright.async_api import async_playwright
 
-          START_URL = sys.argv[1]
-          OUTPUT_FILE = "video_links.txt"
+          START_URL = os.environ["PAGE_URL"]
+          MAX_PAGES = 30
 
-          def page_url(base_url, page_number):
-              parsed = urlparse(base_url)
-              params = parse_qs(parsed.query)
-              params["page"] = [str(page_number)]
+          def is_video_url(url):
+              parsed = urlparse(url)
 
-              query = urlencode(params, doseq=True)
+              return (
+                  parsed.hostname == "rule34gen.com"
+                  and bool(re.match(r"^/video/\d+/", parsed.path))
+              )
 
-              return urlunparse((
-                  parsed.scheme,
-                  parsed.netloc,
-                  parsed.path,
-                  parsed.params,
-                  query,
-                  parsed.fragment
-              ))
-
-          async def main():
-              all_links = set()
-              max_page = 1
+          async def extract_video_links():
+              video_links = set()
+              visited_pages = set()
 
               async with async_playwright() as p:
                   browser = await p.chromium.launch(
@@ -120,48 +112,19 @@ jobs:
                   )
 
                   page = await browser.new_page()
-                  page.set_default_timeout(30000)
+                  current_url = START_URL
 
-                  # First page: discover pagination range
-                  print("Opening first page:", START_URL)
+                  for page_number in range(1, MAX_PAGES + 1):
+                      if not current_url or current_url in visited_pages:
+                          break
 
-                  await page.goto(
-                      START_URL,
-                      wait_until="domcontentloaded",
-                      timeout=60000
-                  )
+                      visited_pages.add(current_url)
 
-                  await page.wait_for_timeout(4000)
-
-                  pagination_links = await page.locator("a[href]").evaluate_all("""
-                      elements => elements.map(a => a.href)
-                  """)
-
-                  for href in pagination_links:
-                      parsed = urlparse(href)
-                      params = parse_qs(parsed.query)
-
-                      if "page" in params:
-                          try:
-                              number = int(params["page"][0])
-                              max_page = max(max_page, number)
-                          except Exception:
-                              pass
-
-                  print("Detected maximum page:", max_page)
-
-                  # Process every page
-                  empty_pages = 0
-
-                  for number in range(1, max_page + 1):
-                      url = page_url(START_URL, number)
-
-                      print(f"\\nProcessing page {number}/{max_page}")
-                      print(url)
+                      print(f"\nScanning page {page_number}: {current_url}")
 
                       try:
                           await page.goto(
-                              url,
+                              current_url,
                               wait_until="domcontentloaded",
                               timeout=60000
                           )
@@ -169,59 +132,88 @@ jobs:
                           await page.wait_for_timeout(3000)
 
                           links = await page.locator(
-                              "a.th.js-open-popup[href], a[href*='/video/']"
-                          ).evaluate_all("""
-                              elements => elements.map(a => a.href)
-                          """)
-
-                          page_links = set()
-
-                          for link in links:
-                              absolute = urljoin(url, link)
-
-                              if "/video/" in absolute:
-                                  page_links.add(absolute.split("?")[0])
-
-                          before = len(all_links)
-                          all_links.update(page_links)
-                          added = len(all_links) - before
-
-                          print(
-                              f"Found {len(page_links)} links, "
-                              f"{added} new links."
+                              "a.th.js-open-popup[href]"
+                          ).evaluate_all(
+                              "els => els.map(a => a.href)"
                           )
 
-                          if not page_links:
-                              empty_pages += 1
-                          else:
-                              empty_pages = 0
+                          before = len(video_links)
 
-                          # Avoid unnecessary requests after consecutive empty pages
-                          if empty_pages >= 2 and number > 1:
-                              print("Two empty pages detected. Stopping.")
+                          for link in links:
+                              if is_video_url(link):
+                                  video_links.add(link)
+
+                          print(
+                              f"Found {len(links)} cards; "
+                              f"{len(video_links) - before} new videos."
+                          )
+
+                          next_url = await page.locator(
+                              "a[href]"
+                          ).evaluate_all("""
+                              els => {
+                                  const a = els.find(x => {
+                                      const t = x.innerText.trim().toLowerCase();
+                                      return t === 'next' ||
+                                             t === 'next »' ||
+                                             t === 'next ›';
+                                  });
+                                  return a ? a.href : null;
+                              }
+                          """)
+
+                          if not next_url:
+                              page_links = await page.locator(
+                                  "a[href]"
+                              ).evaluate_all("""
+                                  els => els.map(a => ({
+                                      text: a.innerText.trim(),
+                                      href: a.href
+                                  }))
+                              """)
+
+                              candidates = []
+
+                              for item in page_links:
+                                  if item["text"].isdigit():
+                                      number = int(item["text"])
+
+                                      if number > page_number:
+                                          candidates.append(
+                                              (number, item["href"])
+                                          )
+
+                              if candidates:
+                                  candidates.sort()
+                                  next_url = candidates[0][1]
+
+                          if not next_url or next_url == current_url:
+                              print("Last page reached.")
                               break
 
+                          current_url = next_url
+
                       except Exception as error:
-                          print(f"Page {number} failed: {error}")
+                          print(f"Page error: {error}")
+                          break
 
                   await browser.close()
 
-              with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-                  for link in sorted(all_links):
-                      f.write(link + "\\n")
+              with open("video_links.txt", "w", encoding="utf-8") as f:
+                  for link in sorted(video_links):
+                      f.write(link + "\n")
 
-              print("\\nTotal unique video links:", len(all_links))
+              print(f"\nTotal unique video links: {len(video_links)}")
 
-          asyncio.run(main())
+          asyncio.run(extract_video_links())
           PY
 
-          python extract_links.py "$PAGE_URL"
+          python extract_links.py
 
           if [ ! -s video_links.txt ]; then
-            echo "No video links were found."
+            echo "No video links found."
             exit 1
           fi
-
       # --------------------------------------------------
       # Download and archive videos
       # --------------------------------------------------
