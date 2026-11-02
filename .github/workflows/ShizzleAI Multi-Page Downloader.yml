@@ -1,21 +1,14 @@
 
-name: ShizzleAI Pages 1-6 Downloader defaults
-  
+name: ShizzleAI All Pages Downloader
+
 on:
   workflow_dispatch:
     inputs:
-      page_number:
-        description: "Select page"
+      start_url:
+        description: "Search page URL"
         required: true
-        type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
-          - "4"
-          - "5"
-          - "6"
-        default: "1"
+        type: string
+        default: "https://rule34gen.com/search/shizzleai-/?sort_by=post_date"
 
       test_only:
         description: "Test mode: download only one video"
@@ -41,10 +34,9 @@ jobs:
     timeout-minutes: 360
 
     env:
-      PAGE_NUMBER: ${{ inputs.page_number }}
       TEST_ONLY: ${{ inputs.test_only }}
       ZIP_PASSWORD: ${{ inputs.zip_password }}
-      START_URL: https://rule34gen.com/search/shizzleai-/?sort_by=post_date
+      START_URL: ${{ inputs.start_url }}
 
     steps:
       - name: Checkout repository
@@ -94,34 +86,47 @@ jobs:
         run: |
           mkdir -p temp_downloads
           mkdir -p debug
-          mkdir -p "ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          mkdir -p ShizzleAI_Videos
 
           if [ -z "$ZIP_PASSWORD" ]; then
             echo "ZIP password is empty."
             exit 1
           fi
 
-          echo "Selected page: ${PAGE_NUMBER}"
-          echo "Test mode: ${TEST_ONLY}"
+          if [ -z "$START_URL" ]; then
+            echo "Start URL is empty."
+            exit 1
+          fi
 
-      - name: Extract video links
+          echo "Start URL: $START_URL"
+          echo "Test mode: $TEST_ONLY"
+
+      # First collect ALL video links from ALL pagination pages.
+      - name: Extract all video links
+        id: extract
         run: |
           cat > extract_links.py <<'PY'
           import os
+          import re
+          from urllib.parse import urljoin, urlparse
           from playwright.sync_api import sync_playwright
 
-          page_number = int(os.environ["PAGE_NUMBER"])
-          start_url = os.environ["START_URL"]
+          START_URL = os.environ["START_URL"]
+          MAX_PAGES = 30
 
-          if page_number == 1:
-              url = start_url
-          else:
-              separator = "&" if "?" in start_url else "?"
-              url = f"{start_url}{separator}page={page_number}"
+          def video_id(url):
+              match = re.search(r"/video/(\d+)", urlparse(url).path)
+              return match.group(1) if match else None
 
-          print(f"Opening: {url}")
+          def is_video_url(url):
+              parsed = urlparse(url)
+              return (
+                  parsed.hostname == "rule34gen.com"
+                  and video_id(url) is not None
+              )
 
-          links = []
+          all_videos = {}
+          visited_pages = set()
 
           with sync_playwright() as p:
               browser = p.chromium.launch(
@@ -140,57 +145,142 @@ jobs:
               page = context.new_page()
               page.set_default_timeout(30000)
 
-              try:
-                  page.goto(
-                      url,
-                      wait_until="domcontentloaded",
-                      timeout=120000
-                  )
-                  page.wait_for_timeout(10000)
+              current_url = START_URL
 
-                  page.screenshot(
-                      path="debug/page.png",
-                      full_page=True
-                  )
+              for page_number in range(1, MAX_PAGES + 1):
+                  if not current_url or current_url in visited_pages:
+                      break
 
-                  with open("debug/page.html", "w", encoding="utf-8") as f:
-                      f.write(page.content())
+                  visited_pages.add(current_url)
 
-                  selectors = [
-                      "a.th.js-open-popup[href]",
-                      "a[href*='/video/']"
-                  ]
+                  print("")
+                  print("=" * 55)
+                  print(f"Scanning page {page_number}: {current_url}")
+                  print("=" * 55)
 
-                  for selector in selectors:
-                      elements = page.locator(selector).all()
+                  try:
+                      response = page.goto(
+                          current_url,
+                          wait_until="domcontentloaded",
+                          timeout=120000
+                      )
 
-                      for element in elements:
-                          href = element.get_attribute("href")
+                      if response:
+                          print("HTTP status:", response.status)
 
-                          if not href:
+                      page.wait_for_timeout(10000)
+
+                      if page_number == 1:
+                          page.screenshot(
+                              path="debug/page.png",
+                              full_page=True
+                          )
+
+                          with open(
+                              "debug/page.html",
+                              "w",
+                              encoding="utf-8"
+                          ) as f:
+                              f.write(page.content())
+
+                      links = page.locator(
+                          "a.th.js-open-popup[href], a[href*='/video/']"
+                      ).evaluate_all(
+                          "els => els.map(a => a.href)"
+                      )
+
+                      page_count = 0
+
+                      for link in links:
+                          link = urljoin(current_url, link)
+
+                          if not is_video_url(link):
                               continue
 
-                          if href.startswith("/"):
-                              href = "https://rule34gen.com" + href
+                          vid = video_id(link)
 
-                          if "/video/" in href and href not in links:
-                              links.append(href)
+                          if vid not in all_videos:
+                              all_videos[vid] = link
+                              page_count += 1
 
-              except Exception as e:
-                  print(f"Page extraction error: {e}")
-                  page.screenshot(
-                      path="debug/error.png",
-                      full_page=True
-                  )
+                      print(f"New videos on this page: {page_count}")
+                      print(f"Unique videos collected: {len(all_videos)}")
 
-              finally:
-                  browser.close()
+                      # Find the actual Next link first.
+                      pagination = page.locator("a[href]").evaluate_all("""
+                          els => els.map(a => ({
+                              text: a.innerText.trim().toLowerCase(),
+                              href: a.href,
+                              rel: (a.getAttribute('rel') || '').toLowerCase()
+                          }))
+                      """)
+
+                      next_url = None
+
+                      for item in pagination:
+                          if (
+                              item["rel"] == "next"
+                              or item["text"] in (
+                                  "next",
+                                  "next »",
+                                  "next ›",
+                                  "»",
+                                  "›"
+                              )
+                          ):
+                              candidate = item["href"]
+
+                              if candidate and candidate != current_url:
+                                  next_url = candidate
+                                  break
+
+                      # If there is no Next link, use the next numbered page.
+                      if not next_url:
+                          candidates = []
+
+                          for item in pagination:
+                              text = item["text"]
+
+                              if text.isdigit():
+                                  number = int(text)
+
+                                  if number > page_number:
+                                      candidates.append(
+                                          (number, item["href"])
+                                      )
+
+                          if candidates:
+                              candidates.sort(key=lambda x: x[0])
+                              next_url = candidates[0][1]
+
+                      if not next_url or next_url in visited_pages:
+                          print("No further page found.")
+                          break
+
+                      current_url = next_url
+
+                  except Exception as error:
+                      print("Page extraction error:", error)
+
+                      page.screenshot(
+                          path=f"debug/error-page-{page_number}.png",
+                          full_page=True
+                      )
+
+                      raise
+
+              browser.close()
 
           with open("video_links.txt", "w", encoding="utf-8") as f:
-              for link in links:
+              for vid, link in all_videos.items():
                   f.write(link + "\n")
 
-          print(f"Found {len(links)} video links")
+          print("")
+          print("=" * 55)
+          print("EXTRACTION COMPLETED")
+          print("Pages scanned:", len(visited_pages))
+          print("Unique videos found:", len(all_videos))
+          print("=" * 55)
           PY
 
           python extract_links.py
@@ -200,15 +290,20 @@ jobs:
             exit 1
           fi
 
-          echo "Extracted links:"
+          VIDEO_COUNT=$(wc -l < video_links.txt)
+
+          echo "video_count=$VIDEO_COUNT" >> "$GITHUB_OUTPUT"
+
+          echo "Total unique videos: $VIDEO_COUNT"
           cat video_links.txt
 
+      # Only after extraction finishes, start downloading one by one.
       - name: Download, ZIP and Push each video
         id: download
         run: |
           set -Eeuo pipefail
 
-          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          PAGE_DIR="ShizzleAI_Videos/All_Pages"
           mkdir -p "$PAGE_DIR" temp_downloads
 
           ARCHIVE="$PAGE_DIR/downloaded.txt"
@@ -230,7 +325,7 @@ jobs:
             TOTAL=$((TOTAL + 1))
 
             if [ "$TEST_ONLY" = "true" ] && [ "$TOTAL" -gt 1 ]; then
-              echo "Test mode: stopping after first video."
+              echo "Test mode: first video processed. Stopping."
               break
             fi
 
@@ -240,7 +335,6 @@ jobs:
             echo "$URL"
             echo "======================================"
 
-            # Extract video ID from URL
             VIDEO_ID=$(echo "$URL" | sed -nE 's#^.*/video/([0-9]+)/.*#\1#p')
 
             if [ -z "$VIDEO_ID" ]; then
@@ -250,17 +344,15 @@ jobs:
               continue
             fi
 
-            # Skip videos already present in the download archive
-            if grep -qE "[[:space:]]${VIDEO_ID}$" "$ARCHIVE"; then
+            # Check exact video ID, not the URL or title.
+            if grep -Fxq "$VIDEO_ID" "$ARCHIVE"; then
               echo "Already downloaded: $VIDEO_ID"
               SKIPPED=$((SKIPPED + 1))
               continue
             fi
 
-            # Clean temporary files from previous video
             rm -f temp_downloads/*
 
-            # Download one video
             echo "Starting download..."
 
             if ! yt-dlp \
@@ -284,8 +376,8 @@ jobs:
               continue
             fi
 
-            # Locate downloaded video
             shopt -s nullglob
+
             VIDEO_FILES=(
               temp_downloads/*.mp4
               temp_downloads/*.mkv
@@ -307,9 +399,7 @@ jobs:
             ZIP_PATH="$PAGE_DIR/${NAME}.zip"
 
             echo "Downloaded: $BASENAME"
-
-            # Create AES-256 ZIP
-            echo "Creating encrypted ZIP..."
+            echo "Creating AES-256 ZIP..."
 
             rm -f "$ZIP_PATH" "$ZIP_PATH".part-*
 
@@ -328,7 +418,6 @@ jobs:
               continue
             fi
 
-            # Verify ZIP
             if ! 7z t "-p${ZIP_PASSWORD}" "$ZIP_PATH"; then
               echo "ZIP verification failed."
               rm -f "$ZIP_PATH"
@@ -337,8 +426,7 @@ jobs:
               continue
             fi
 
-            # Split into 45 MB parts
-            echo "Splitting ZIP..."
+            echo "Splitting ZIP into 45 MB parts..."
 
             if ! split -b 45M -d -a 3 \
               "$ZIP_PATH" \
@@ -351,7 +439,6 @@ jobs:
               continue
             fi
 
-            # Verify split files exist
             PARTS=( "$ZIP_PATH".part-* )
 
             if [ "${#PARTS[@]}" -eq 0 ]; then
@@ -361,12 +448,11 @@ jobs:
               continue
             fi
 
-            # Remove original ZIP and downloaded video
             rm -f "$ZIP_PATH" "$FILE"
 
-            # Create README for this video
             cat > "$PAGE_DIR/${NAME}_README.txt" <<EOF
           Video: $BASENAME
+          Video ID: $VIDEO_ID
           Encryption: AES-256
           Split size: 45 MB
 
@@ -376,19 +462,21 @@ jobs:
           Open the reconstructed ZIP using 7-Zip and enter the password.
           EOF
 
-            echo "ZIP parts created:"
+            # Record successful video ID.
+            echo "$VIDEO_ID" >> "$ARCHIVE"
+
+            echo "ZIP parts:"
             ls -lh "$ZIP_PATH".part-*
 
-            # Add only this video's files and archive record
-            git add "$PAGE_DIR"
+            # Stage this page's current changes and commit.
+            git add -A "$PAGE_DIR"
 
             if git diff --cached --quiet; then
-              echo "No staged changes found."
+              echo "No staged changes."
               FAILED=$((FAILED + 1))
               continue
             fi
 
-            # Commit this video separately
             git commit -m "Add ShizzleAI video ${VIDEO_ID}"
 
             echo "Pushing video ${VIDEO_ID}..."
@@ -407,31 +495,31 @@ jobs:
                 break
               fi
 
-              echo "Push failed."
+              echo "Push failed. Checking remote..."
 
-              # Check whether remote branch moved.
-              if ! git fetch origin "$BRANCH"; then
-                echo "Fetch failed. Retrying same commit."
-              else
+              if git fetch origin "$BRANCH"; then
                 LOCAL_HEAD=$(git rev-parse HEAD)
                 REMOTE_HEAD=$(git rev-parse "origin/${BRANCH}")
 
-                if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
-                  if git merge-base --is-ancestor "$LOCAL_HEAD" "$REMOTE_HEAD"; then
-                    echo "Remote already contains this commit."
-                    PUSHED=true
-                    break
-                  fi
+                if [ "$LOCAL_HEAD" = "$REMOTE_HEAD" ]; then
+                  echo "Remote already has this commit."
+                  PUSHED=true
+                  break
+                fi
 
-                  if git merge-base --is-ancestor "$REMOTE_HEAD" "$LOCAL_HEAD"; then
-                    echo "Local commit is ahead. Retrying push."
-                  else
-                    echo "Remote has independent changes. Rebasing..."
-                    if ! git rebase "origin/${BRANCH}"; then
-                      echo "Rebase failed."
-                      git rebase --abort || true
-                      exit 1
-                    fi
+                if git merge-base --is-ancestor "$LOCAL_HEAD" "$REMOTE_HEAD"; then
+                  echo "Remote already contains this commit."
+                  PUSHED=true
+                  break
+                fi
+
+                if ! git merge-base --is-ancestor "$REMOTE_HEAD" "$LOCAL_HEAD"; then
+                  echo "Remote has independent changes. Rebasing..."
+
+                  if ! git rebase "origin/${BRANCH}"; then
+                    echo "Rebase failed."
+                    git rebase --abort || true
+                    exit 1
                   fi
                 fi
               fi
@@ -453,7 +541,6 @@ jobs:
 
           done < video_links.txt
 
-          # Save summary
           echo "success=$SUCCESS" >> "$GITHUB_OUTPUT"
           echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
           echo "skipped=$SKIPPED" >> "$GITHUB_OUTPUT"
@@ -461,9 +548,10 @@ jobs:
           echo ""
           echo "======================================"
           echo "FINAL SUMMARY"
+          echo "Unique videos in list: $(wc -l < video_links.txt)"
           echo "Processed: $TOTAL"
           echo "Successfully pushed: $SUCCESS"
-          echo "Skipped: $SKIPPED"
+          echo "Already downloaded: $SKIPPED"
           echo "Failed: $FAILED"
           echo "======================================"
 
@@ -475,23 +563,24 @@ jobs:
       - name: Generate page report
         if: always()
         run: |
-          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          PAGE_DIR="ShizzleAI_Videos/All_Pages"
           mkdir -p "$PAGE_DIR"
 
           cat > "$PAGE_DIR/README.md" <<EOF
-          # ShizzleAI - Page ${PAGE_NUMBER}
+          # ShizzleAI - All Pages
 
-          - Page: ${PAGE_NUMBER}
+          - Search URL: ${START_URL}
           - Test mode: ${TEST_ONLY}
+          - Unique videos found: ${{ steps.extract.outputs.video_count }}
           - Successfully pushed: ${{ steps.download.outputs.success }}
-          - Skipped: ${{ steps.download.outputs.skipped }}
+          - Already downloaded: ${{ steps.download.outputs.skipped }}
           - Failed: ${{ steps.download.outputs.failed }}
           - Archive format: ZIP
           - Encryption: AES-256
           - Archive volume size: 45 MB
 
-          Each video has its own encrypted ZIP archive.
-          Keep all split archive parts together when extracting.
+          All search pages are scanned before downloads begin.
+          Each video is downloaded, archived and pushed separately.
           EOF
 
           echo "Generated files:"
@@ -500,19 +589,19 @@ jobs:
       - name: Commit and push page report
         if: always()
         run: |
-          set +e
+          set -e
 
-          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          PAGE_DIR="ShizzleAI_Videos/All_Pages"
           BRANCH="${GITHUB_REF_NAME}"
 
-          git add "$PAGE_DIR/README.md" "$PAGE_DIR/failed.txt"
+          git add -A "$PAGE_DIR"
 
           if git diff --cached --quiet; then
             echo "No report changes."
             exit 0
           fi
 
-          git commit -m "Update ShizzleAI page ${PAGE_NUMBER} report" || exit 1
+          git commit -m "Update ShizzleAI all-pages report"
 
           ATTEMPT=1
           MAX_RETRIES=8
@@ -523,11 +612,19 @@ jobs:
               exit 0
             fi
 
-            echo "Report push failed. Fetching remote..."
+            echo "Report push failed. Checking remote..."
             git fetch origin "$BRANCH" || true
 
-            if ! git rebase "origin/${BRANCH}"; then
-              git rebase --abort || true
+            if git merge-base --is-ancestor HEAD "origin/${BRANCH}"; then
+              echo "Remote already contains the report."
+              exit 0
+            fi
+
+            if ! git merge-base --is-ancestor "origin/${BRANCH}" HEAD; then
+              if ! git rebase "origin/${BRANCH}"; then
+                git rebase --abort || true
+                exit 1
+              fi
             fi
 
             sleep $((ATTEMPT * 10))
@@ -541,7 +638,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shizzleai-debug-page-${{ inputs.page_number }}
+          name: shizzleai-debug-all-pages
           path: |
             debug/
             video_links.txt
