@@ -1,3 +1,4 @@
+
 name: ShizzleAI All Pages Downloader
 
 on:
@@ -38,11 +39,15 @@ jobs:
       START_URL: ${{ inputs.start_url }}
 
     steps:
-      - name: Checkout repository
+      # IMPORTANT: fetch only the checkpoint file, not the 28+ GB of old video parts.
+      - name: Checkout repository (checkpoint only)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: true
+          sparse-checkout: |
+            ShizzleAI_Videos/All_Pages/downloaded.txt
+          sparse-checkout-cone-mode: false
 
       - name: Configure Git
         run: |
@@ -56,13 +61,6 @@ jobs:
           git config pack.windowMemory 100m
           git config pack.packSizeLimit 100m
           git config pack.threads 1
-
-      # Always refresh the checkpoint from the latest remote commit on a new runner.
-      - name: Sync latest repository state
-        run: |
-          BRANCH="${GITHUB_REF_NAME}"
-          git fetch origin "$BRANCH"
-          git reset --hard "origin/${BRANCH}"
 
       - name: Install system packages
         run: |
@@ -304,8 +302,10 @@ jobs:
           cat video_links.txt
 
       # Only after extraction finishes, start downloading one by one.
+      # Sparse checkout keeps all old video files on GitHub, but does NOT download them to this runner.
       - name: Download, ZIP and Push each video
         id: download
+        shell: bash
         run: |
           set -Eeuo pipefail
 
@@ -315,12 +315,9 @@ jobs:
           ARCHIVE="$PAGE_DIR/downloaded.txt"
           FAILED_FILE="$PAGE_DIR/failed.txt"
 
+          # The only old file checked out from this folder is downloaded.txt.
           touch "$ARCHIVE"
-
-          # downloaded.txt is the resume checkpoint committed after each successful push.
           sort -u "$ARCHIVE" -o "$ARCHIVE"
-          echo "Resume checkpoint: $(wc -l < "$ARCHIVE") video IDs already downloaded."
-          echo "Previously downloaded IDs will be skipped."
 
           BRANCH="${GITHUB_REF_NAME}"
           MAX_RETRIES=8
@@ -329,6 +326,10 @@ jobs:
           FAILED=0
           SKIPPED=0
           TOTAL=0
+
+          echo "Checkpoint IDs: $(wc -l < "$ARCHIVE")"
+          echo "Disk space before processing:"
+          df -h "$GITHUB_WORKSPACE"
 
           while IFS= read -r URL || [ -n "$URL" ]; do
             [ -z "$URL" ] && continue
@@ -351,23 +352,31 @@ jobs:
             if [ -z "$VIDEO_ID" ]; then
               echo "Could not identify video ID."
               FAILED=$((FAILED + 1))
-              echo "$URL" >> "$FAILED_FILE"
+              printf '%s\n' "$URL" >> "$FAILED_FILE"
               continue
             fi
 
-            # Check exact video ID, not the URL or title.
+            # Exact ID match against the remote checkpoint.
             if grep -Fxq "$VIDEO_ID" "$ARCHIVE"; then
               echo "Already downloaded: $VIDEO_ID"
               SKIPPED=$((SKIPPED + 1))
               continue
             fi
 
-            rm -f temp_downloads/*
+            # Check available disk space before starting a potentially large download.
+            FREE_KB=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')
+            FREE_GB=$(awk -v kb="$FREE_KB" 'BEGIN {printf "%.2f", kb/1024/1024}')
+            echo "Available disk space: ${FREE_GB} GB"
 
+            if [ "$FREE_KB" -lt 3000000 ]; then
+              echo "Less than 3 GB free. Stopping safely before the next download."
+              break
+            fi
+
+            rm -f temp_downloads/*
             echo "Starting download..."
 
-            # Hard limit: metadata extraction + download may not run forever.
-            # If a video stalls, terminate it and continue with the next URL.
+            # Hard limit prevents a stalled extractor/download from blocking the queue forever.
             if ! timeout --signal=TERM --kill-after=30s 15m yt-dlp \
               --no-overwrites \
               --retries 3 \
@@ -383,15 +392,14 @@ jobs:
               -o "temp_downloads/%(title).150B_%(id)s.%(ext)s" \
               "$URL"; then
 
-              echo "Download failed or timed out after 15 minutes: $VIDEO_ID"
+              echo "Download failed or timed out: $VIDEO_ID"
               FAILED=$((FAILED + 1))
-              echo "$URL" >> "$FAILED_FILE"
+              printf '%s\n' "$URL" >> "$FAILED_FILE"
               rm -f temp_downloads/*
               continue
             fi
 
             shopt -s nullglob
-
             VIDEO_FILES=(
               temp_downloads/*.mp4
               temp_downloads/*.mkv
@@ -403,7 +411,7 @@ jobs:
             if [ "${#VIDEO_FILES[@]}" -eq 0 ]; then
               echo "Downloaded file not found."
               FAILED=$((FAILED + 1))
-              echo "$URL" >> "$FAILED_FILE"
+              printf '%s\n' "$URL" >> "$FAILED_FILE"
               continue
             fi
 
@@ -411,10 +419,10 @@ jobs:
             BASENAME=$(basename "$FILE")
             NAME="${BASENAME%.*}"
             ZIP_PATH="$PAGE_DIR/${NAME}.zip"
+            README_FILE="$PAGE_DIR/${NAME}_README.txt"
 
             echo "Downloaded: $BASENAME"
             echo "Creating AES-256 ZIP..."
-
             rm -f "$ZIP_PATH" "$ZIP_PATH".part-*
 
             if ! 7z a \
@@ -428,7 +436,8 @@ jobs:
 
               echo "ZIP creation failed."
               FAILED=$((FAILED + 1))
-              echo "$URL" >> "$FAILED_FILE"
+              printf '%s\n' "$URL" >> "$FAILED_FILE"
+              rm -f "$ZIP_PATH"
               continue
             fi
 
@@ -436,12 +445,15 @@ jobs:
               echo "ZIP verification failed."
               rm -f "$ZIP_PATH"
               FAILED=$((FAILED + 1))
-              echo "$URL" >> "$FAILED_FILE"
+              printf '%s\n' "$URL" >> "$FAILED_FILE"
               continue
             fi
 
-            echo "Splitting ZIP into 45 MB parts..."
+            # Free the large source video BEFORE splitting the ZIP.
+            # This avoids keeping the video + ZIP + ZIP parts on disk simultaneously.
+            rm -f "$FILE"
 
+            echo "Splitting ZIP into 45 MB parts..."
             if ! split -b 45M -d -a 3 \
               "$ZIP_PATH" \
               "$ZIP_PATH.part-"; then
@@ -449,22 +461,23 @@ jobs:
               echo "ZIP splitting failed."
               rm -f "$ZIP_PATH" "$ZIP_PATH".part-*
               FAILED=$((FAILED + 1))
-              echo "$URL" >> "$FAILED_FILE"
+              printf '%s\n' "$URL" >> "$FAILED_FILE"
               continue
             fi
 
             PARTS=( "$ZIP_PATH".part-* )
-
             if [ "${#PARTS[@]}" -eq 0 ]; then
               echo "No ZIP parts created."
+              rm -f "$ZIP_PATH"
               FAILED=$((FAILED + 1))
-              echo "$URL" >> "$FAILED_FILE"
+              printf '%s\n' "$URL" >> "$FAILED_FILE"
               continue
             fi
 
-            rm -f "$ZIP_PATH" "$FILE"
+            # The split parts are now the final output; remove the full ZIP copy.
+            rm -f "$ZIP_PATH"
 
-            cat > "$PAGE_DIR/${NAME}_README.txt" <<EOF
+            cat > "$README_FILE" <<EOF
           Video: $BASENAME
           Video ID: $VIDEO_ID
           Encryption: AES-256
@@ -476,25 +489,26 @@ jobs:
           Open the reconstructed ZIP using 7-Zip and enter the password.
           EOF
 
-            # Record successful video ID.
-            echo "$VIDEO_ID" >> "$ARCHIVE"
-
             echo "ZIP parts:"
             ls -lh "$ZIP_PATH".part-*
 
-            # Stage this page's current changes and commit.
-            git add -A "$PAGE_DIR"
+            # Stage ONLY this video's new parts, its README, and the checkpoint.
+            # --sparse permits adding new files outside the sparse checkout without checking out old files.
+            git add --sparse -- "$README_FILE" "${PARTS[@]}"
 
             if git diff --cached --quiet; then
-              echo "No staged changes."
+              echo "No staged changes; refusing to mark this video as complete."
               FAILED=$((FAILED + 1))
               continue
             fi
 
+            # Record the ID in the same commit as the completed archive parts.
+            printf '%s\n' "$VIDEO_ID" >> "$ARCHIVE"
+            git add --sparse -- "$ARCHIVE"
+
             git commit -m "Add ShizzleAI video ${VIDEO_ID}"
 
             echo "Pushing video ${VIDEO_ID}..."
-
             ATTEMPT=1
             PUSHED=false
 
@@ -504,44 +518,32 @@ jobs:
               if git -c http.postBuffer=524288000 \
                      -c http.version=HTTP/1.1 \
                      push origin "HEAD:${BRANCH}"; then
-
                 PUSHED=true
                 break
               fi
 
-              echo "Push failed. Checking remote..."
-
-              if git fetch origin "$BRANCH"; then
+              echo "Push failed. Fetching latest branch state..."
+              if git fetch --depth=1 origin "$BRANCH"; then
+                REMOTE_HEAD=$(git rev-parse FETCH_HEAD)
                 LOCAL_HEAD=$(git rev-parse HEAD)
-                REMOTE_HEAD=$(git rev-parse "origin/${BRANCH}")
 
                 if [ "$LOCAL_HEAD" = "$REMOTE_HEAD" ]; then
-                  echo "Remote already has this commit."
-                  PUSHED=true
-                  break
-                fi
-
-                if git merge-base --is-ancestor "$LOCAL_HEAD" "$REMOTE_HEAD"; then
                   echo "Remote already contains this commit."
                   PUSHED=true
                   break
                 fi
 
+                # With concurrency enabled, a non-fast-forward should be unusual.
+                # Stop rather than risk overwriting another run's checkpoint or files.
                 if ! git merge-base --is-ancestor "$REMOTE_HEAD" "$LOCAL_HEAD"; then
-                  echo "Remote has independent changes. Rebasing..."
-
-                  if ! git rebase "origin/${BRANCH}"; then
-                    echo "Rebase failed."
-                    git rebase --abort || true
-                    exit 1
-                  fi
+                  echo "Remote branch changed independently. Stopping to protect existing files."
+                  exit 1
                 fi
               fi
 
               WAIT_TIME=$((ATTEMPT * 10))
               echo "Waiting ${WAIT_TIME} seconds..."
               sleep "$WAIT_TIME"
-
               ATTEMPT=$((ATTEMPT + 1))
             done
 
@@ -552,6 +554,8 @@ jobs:
 
             SUCCESS=$((SUCCESS + 1))
             echo "Video ${VIDEO_ID} successfully pushed."
+            echo "Disk space after push:"
+            df -h "$GITHUB_WORKSPACE"
 
           done < video_links.txt
 
@@ -594,14 +598,12 @@ jobs:
           - Archive volume size: 45 MB
 
           All search pages are scanned before downloads begin.
-          The latest downloaded.txt is checked on every new runner.
-          Previously downloaded video IDs are skipped automatically.
+          Only downloaded.txt is checked out from the archive folder; old video files remain on GitHub and are not downloaded to the runner.
           Each new video is downloaded, archived and pushed separately.
-          yt-dlp is limited to 15 minutes per video; timed-out videos are skipped and logged.
+          yt-dlp is limited to 15 minutes per video.
           EOF
 
-          echo "Generated files:"
-          find "$PAGE_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "Generated report."
 
       - name: Commit and push page report
         if: always()
@@ -611,7 +613,11 @@ jobs:
           PAGE_DIR="ShizzleAI_Videos/All_Pages"
           BRANCH="${GITHUB_REF_NAME}"
 
-          git add -A "$PAGE_DIR"
+          # Add only the report and small status file; never stage the whole sparse folder.
+          git add --sparse -- "$PAGE_DIR/README.md"
+          if [ -f "$PAGE_DIR/failed.txt" ]; then
+            git add --sparse -- "$PAGE_DIR/failed.txt"
+          fi
 
           if git diff --cached --quiet; then
             echo "No report changes."
@@ -622,28 +628,13 @@ jobs:
 
           ATTEMPT=1
           MAX_RETRIES=8
-
           while [ "$ATTEMPT" -le "$MAX_RETRIES" ]; do
             if git push origin "HEAD:${BRANCH}"; then
               echo "Report pushed successfully."
               exit 0
             fi
 
-            echo "Report push failed. Checking remote..."
-            git fetch origin "$BRANCH" || true
-
-            if git merge-base --is-ancestor HEAD "origin/${BRANCH}"; then
-              echo "Remote already contains the report."
-              exit 0
-            fi
-
-            if ! git merge-base --is-ancestor "origin/${BRANCH}" HEAD; then
-              if ! git rebase "origin/${BRANCH}"; then
-                git rebase --abort || true
-                exit 1
-              fi
-            fi
-
+            echo "Report push failed. Retrying..."
             sleep $((ATTEMPT * 10))
             ATTEMPT=$((ATTEMPT + 1))
           done
