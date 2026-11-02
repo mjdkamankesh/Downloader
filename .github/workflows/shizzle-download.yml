@@ -279,6 +279,7 @@ jobs:
             exit 1
           fi
 
+      
       - name: Create AES-256 ZIP archives
         if: always()
         run: |
@@ -302,37 +303,38 @@ jobs:
 
             BASENAME=$(basename "$FILE")
             NAME="${BASENAME%.*}"
-            ZIP_PATH="$PAGE_DIR/$NAME.zip"
+            ZIP_PATH="$PAGE_DIR/${NAME}.zip"
 
-            echo "Creating encrypted archive: $ZIP_PATH"
+            echo "Preparing archive: $ZIP_PATH"
 
+            # Remove previous archive and all its split volumes
+            rm -f "$ZIP_PATH" "$ZIP_PATH".*
+
+            # Create encrypted split archive
             7z a \
               -tzip \
+              "$ZIP_PATH" \
+              "$FILE" \
               -v45m \
-              -p"${ZIP_PASSWORD}" \
+              "-p${ZIP_PASSWORD}" \
               -mem=AES256 \
               -mx=0 \
-              "$ZIP_PATH" \
-              "$FILE"
+              -y
 
-            if [ $? -eq 0 ]; then
-              echo "Archive created successfully."
+            echo "Archive created successfully."
 
-              cat > "$PAGE_DIR/${NAME}_README.txt" <<EOF
+            cat > "$PAGE_DIR/${NAME}_README.txt" <<EOF
           Video: $BASENAME
-          Archive: $NAME.zip
+          Archive: ${NAME}.zip
           Encryption: AES-256
           Split size: 45 MB
           Password: The password entered when starting the workflow.
           Extraction: Keep all ZIP volume parts together before extraction.
           EOF
-            else
-              echo "Archive creation failed for $FILE"
-              exit 1
-            fi
           done
 
-          echo "Archive creation completed."
+          echo "All archives completed."
+
 
       - name: Generate page report
         if: always()
