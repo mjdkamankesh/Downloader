@@ -1,6 +1,6 @@
 
-name: ShizzleAI Pages 1-6 Downloader
-
+name: ShizzleAI Pages 1-6 Downloader defaults
+  
 on:
   workflow_dispatch:
     inputs:
