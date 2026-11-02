@@ -1,0 +1,9 @@
+Video: Orc Futa test._18200.mp4
+Video ID: 18200
+Encryption: AES-256
+Split size: 45 MB
+
+Reassemble on Linux:
+cat "Orc Futa test._18200.zip.part-"* > "Orc Futa test._18200.zip"
+
+Open the reconstructed ZIP using 7-Zip and enter the password.
