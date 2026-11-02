@@ -395,14 +395,14 @@ jobs:
           MAX_RETRIES=8
           ATTEMPT=1
 
-          git add "ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          git add ShizzleAI_Videos failed.txt 2>/dev/null || true
 
           if git diff --cached --quiet; then
             echo "Nothing to commit."
             exit 0
           fi
 
-          git commit -m "Add ShizzleAI page ${PAGE_NUMBER} downloads"
+          git commit -m "Add ShizzleAI video downloads"
 
           if [ $? -ne 0 ]; then
             echo "Commit failed."
@@ -429,15 +429,13 @@ jobs:
               git rebase "origin/${BRANCH}"
 
               if [ $? -ne 0 ]; then
-                echo "Rebase failed. Trying to abort..."
+                echo "Rebase failed."
                 git rebase --abort
               fi
             fi
 
             WAIT_TIME=$((ATTEMPT * 10))
-            echo "Waiting ${WAIT_TIME} seconds before retry..."
             sleep "$WAIT_TIME"
-
             ATTEMPT=$((ATTEMPT + 1))
           done
 
