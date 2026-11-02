@@ -1,0 +1,9 @@
+Video: What Happens in Ha-wee-wee... Stays in Ha-wee-wee_20575.mp4
+Video ID: 20575
+Encryption: AES-256
+Split size: 45 MB
+
+Reassemble on Linux:
+cat "What Happens in Ha-wee-wee... Stays in Ha-wee-wee_20575.zip.part-"* > "What Happens in Ha-wee-wee... Stays in Ha-wee-wee_20575.zip"
+
+Open the reconstructed ZIP using 7-Zip and enter the password.
