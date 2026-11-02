@@ -1,13 +1,32 @@
-name: ShizzleAI Auto Downloader
+
+name: ShizzleAI Pages 1-6 Downloader
 
 on:
   workflow_dispatch:
     inputs:
-      start_url:
-        description: "Starting search URL"
+      page_number:
+        description: "Select page"
+        required: true
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+          - "5"
+          - "6"
+        default: "1"
+
+      test_only:
+        description: "Test mode: download only one video"
+        required: true
+        type: boolean
+        default: true
+
+      zip_password:
+        description: "Password for AES-256 ZIP files"
         required: true
         type: string
-        default: "https://rule34gen.com/search/shizzleai-/?sort_by=post_date"
 
 permissions:
   contents: write
@@ -22,10 +41,10 @@ jobs:
     timeout-minutes: 360
 
     env:
-      START_URL: ${{ inputs.start_url }}
-      ZIP_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
-      DOWNLOAD_DIR: ShizzleAI_Videos
-      TEMP_DIR: temp_downloads
+      PAGE_NUMBER: ${{ inputs.page_number }}
+      TEST_ONLY: ${{ inputs.test_only }}
+      ZIP_PASSWORD: ${{ inputs.zip_password }}
+      START_URL: https://rule34gen.com/search/shizzleai-/?sort_by=post_date
 
     steps:
       - name: Checkout repository
@@ -38,15 +57,24 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git config http.version HTTP/1.1
           git config http.postBuffer 524288000
+          git config http.maxRequestBuffer 100M
           git config core.compression 0
+          git config pack.windowMemory 100m
+          git config pack.packSizeLimit 100m
           git config pack.threads 1
 
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 p7zip-full git unzip ffmpeg
+          sudo apt-get install -y \
+            aria2 \
+            p7zip-full \
+            git \
+            unzip \
+            ffmpeg
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -56,7 +84,7 @@ jobs:
       - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
-          pip install playwright yt-dlp
+          pip install playwright yt-dlp pyzipper
 
       - name: Install Chromium
         run: |
@@ -66,149 +94,103 @@ jobs:
         run: |
           mkdir -p temp_downloads
           mkdir -p debug
-          mkdir -p ShizzleAI_Videos
+          mkdir -p "ShizzleAI_Videos/Page_${PAGE_NUMBER}"
 
           if [ -z "$ZIP_PASSWORD" ]; then
-            echo "ZIP_PASSWORD secret is not configured."
+            echo "ZIP password is empty."
             exit 1
           fi
 
-      - name: Extract all video links
+          echo "Selected page: ${PAGE_NUMBER}"
+          echo "Test mode: ${TEST_ONLY}"
+
+      - name: Extract video links
         run: |
           cat > extract_links.py <<'PY'
-          import asyncio
           import os
-          import re
-          from urllib.parse import urlparse, urljoin
-          from playwright.async_api import async_playwright
+          from playwright.sync_api import sync_playwright
 
-          START_URL = os.environ["START_URL"]
-          MAX_PAGES = 30
+          page_number = int(os.environ["PAGE_NUMBER"])
+          start_url = os.environ["START_URL"]
 
-          def is_video_url(url):
-              parsed = urlparse(url)
-              return (
-                  parsed.hostname == "rule34gen.com"
-                  and bool(re.match(r"^/video/\d+/", parsed.path))
+          if page_number == 1:
+              url = start_url
+          else:
+              separator = "&" if "?" in start_url else "?"
+              url = f"{start_url}{separator}page={page_number}"
+
+          print(f"Opening: {url}")
+
+          links = []
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(
+                  headless=True,
+                  args=["--no-sandbox", "--disable-dev-shm-usage"]
               )
 
-          async def extract_video_links():
-              video_links = set()
-              visited_pages = set()
+              context = browser.new_context(
+                  user_agent=(
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36"
+                  )
+              )
 
-              async with async_playwright() as p:
-                  browser = await p.chromium.launch(
-                      headless=True,
-                      args=["--no-sandbox", "--disable-dev-shm-usage"]
+              page = context.new_page()
+              page.set_default_timeout(30000)
+
+              try:
+                  page.goto(
+                      url,
+                      wait_until="domcontentloaded",
+                      timeout=120000
+                  )
+                  page.wait_for_timeout(10000)
+
+                  page.screenshot(
+                      path="debug/page.png",
+                      full_page=True
                   )
 
-                  page = await browser.new_page()
-                  current_url = START_URL
+                  with open("debug/page.html", "w", encoding="utf-8") as f:
+                      f.write(page.content())
 
-                  for page_number in range(1, MAX_PAGES + 1):
-                      if not current_url or current_url in visited_pages:
-                          break
+                  selectors = [
+                      "a.th.js-open-popup[href]",
+                      "a[href*='/video/']"
+                  ]
 
-                      visited_pages.add(current_url)
+                  for selector in selectors:
+                      elements = page.locator(selector).all()
 
-                      print(f"\nScanning page {page_number}: {current_url}")
+                      for element in elements:
+                          href = element.get_attribute("href")
 
-                      try:
-                          response = await page.goto(
-                              current_url,
-                              wait_until="domcontentloaded",
-                              timeout=60000
-                          )
+                          if not href:
+                              continue
 
-                          await page.wait_for_timeout(3000)
+                          if href.startswith("/"):
+                              href = "https://rule34gen.com" + href
 
-                          print(
-                              "HTTP status:",
-                              response.status if response else "Unknown"
-                          )
-                          print("Final URL:", page.url)
-                          print("Page title:", await page.title())
+                          if "/video/" in href and href not in links:
+                              links.append(href)
 
-                          # استفاده از سلکتور اصلی اسکریپت کاربر
-                          links = await page.locator(
-                              "a.th.js-open-popup[href]"
-                          ).evaluate_all(
-                              "els => els.map(a => a.href)"
-                          )
+              except Exception as e:
+                  print(f"Page extraction error: {e}")
+                  page.screenshot(
+                      path="debug/error.png",
+                      full_page=True
+                  )
 
-                          # فیلتر لینک‌های ویدئو
-                          for link in links:
-                              if is_video_url(link):
-                                  video_links.add(link)
+              finally:
+                  browser.close()
 
-                          print(
-                              f"Cards: {len(links)} | "
-                              f"Total videos: {len(video_links)}"
-                          )
+          with open("video_links.txt", "w", encoding="utf-8") as f:
+              for link in links:
+                  f.write(link + "\n")
 
-                          # پیدا کردن دکمه Next
-                          next_url = await page.locator(
-                              "a[href]"
-                          ).evaluate_all("""
-                              els => {
-                                  const a = els.find(x => {
-                                      const t = x.innerText.trim().toLowerCase();
-                                      return t === 'next' ||
-                                             t === 'next »' ||
-                                             t === 'next ›';
-                                  });
-                                  return a ? a.href : null;
-                              }
-                          """)
-
-                          # اگر Next نبود، شماره صفحه بعدی را پیدا کن
-                          if not next_url:
-                              page_links = await page.locator(
-                                  "a[href]"
-                              ).evaluate_all("""
-                                  els => els.map(a => ({
-                                      text: a.innerText.trim(),
-                                      href: a.href
-                                  }))
-                              """)
-
-                              candidates = []
-
-                              for item in page_links:
-                                  if item["text"].isdigit():
-                                      number = int(item["text"])
-
-                                      if number > page_number:
-                                          candidates.append(
-                                              (number, item["href"])
-                                          )
-
-                              if candidates:
-                                  candidates.sort()
-                                  next_url = candidates[0][1]
-
-                          if next_url:
-                              next_url = urljoin(current_url, next_url)
-
-                          if not next_url or next_url == current_url:
-                              print("Last page reached.")
-                              break
-
-                          current_url = next_url
-
-                      except Exception as error:
-                          print("Page error:", error)
-                          break
-
-                  await browser.close()
-
-              with open("video_links.txt", "w", encoding="utf-8") as f:
-                  for link in sorted(video_links):
-                      f.write(link + "\n")
-
-              print("\nTotal unique video links:", len(video_links))
-
-          asyncio.run(extract_video_links())
+          print(f"Found {len(links)} video links")
           PY
 
           python extract_links.py
@@ -218,20 +200,28 @@ jobs:
             exit 1
           fi
 
-          echo "Extracted video links:"
+          echo "Extracted links:"
           cat video_links.txt
 
-      - name: Download videos with Aria2
+      - name: Download, ZIP and Push each video
         id: download
         run: |
-          set +e
+          set -Eeuo pipefail
 
-          mkdir -p temp_downloads
-          ARCHIVE="$RUNNER_TEMP/shizzle-download-archive.txt"
+          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          mkdir -p "$PAGE_DIR" temp_downloads
+
+          ARCHIVE="$PAGE_DIR/downloaded.txt"
+          FAILED_FILE="$PAGE_DIR/failed.txt"
+
           touch "$ARCHIVE"
+
+          BRANCH="${GITHUB_REF_NAME}"
+          MAX_RETRIES=8
 
           SUCCESS=0
           FAILED=0
+          SKIPPED=0
           TOTAL=0
 
           while IFS= read -r URL || [ -n "$URL" ]; do
@@ -239,15 +229,42 @@ jobs:
 
             TOTAL=$((TOTAL + 1))
 
+            if [ "$TEST_ONLY" = "true" ] && [ "$TOTAL" -gt 1 ]; then
+              echo "Test mode: stopping after first video."
+              break
+            fi
+
             echo ""
             echo "======================================"
             echo "Video $TOTAL"
             echo "$URL"
             echo "======================================"
 
-            if yt-dlp \
+            # Extract video ID from URL
+            VIDEO_ID=$(echo "$URL" | sed -nE 's#^.*/video/([0-9]+)/.*#\1#p')
+
+            if [ -z "$VIDEO_ID" ]; then
+              echo "Could not identify video ID."
+              FAILED=$((FAILED + 1))
+              echo "$URL" >> "$FAILED_FILE"
+              continue
+            fi
+
+            # Skip videos already present in the download archive
+            if grep -qE "[[:space:]]${VIDEO_ID}$" "$ARCHIVE"; then
+              echo "Already downloaded: $VIDEO_ID"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            # Clean temporary files from previous video
+            rm -f temp_downloads/*
+
+            # Download one video
+            echo "Starting download..."
+
+            if ! yt-dlp \
               --no-overwrites \
-              --download-archive "$ARCHIVE" \
               --retries 10 \
               --fragment-retries 10 \
               --file-access-retries 10 \
@@ -261,173 +278,272 @@ jobs:
               -o "temp_downloads/%(title).150B_%(id)s.%(ext)s" \
               "$URL"; then
 
-              SUCCESS=$((SUCCESS + 1))
-              echo "RESULT: SUCCESS"
-            else
+              echo "Download failed."
               FAILED=$((FAILED + 1))
-              echo "$URL" >> failed.txt
-              echo "RESULT: FAILED"
+              echo "$URL" >> "$FAILED_FILE"
+              continue
             fi
 
-          done < video_links.txt
+            # Locate downloaded video
+            shopt -s nullglob
+            VIDEO_FILES=(
+              temp_downloads/*.mp4
+              temp_downloads/*.mkv
+              temp_downloads/*.webm
+              temp_downloads/*.mov
+              temp_downloads/*.avi
+            )
 
-          echo ""
-          echo "======================================"
-          echo "Download summary"
-          echo "Total: $TOTAL"
-          echo "Successful: $SUCCESS"
-          echo "Failed: $FAILED"
-          echo "======================================"
+            if [ "${#VIDEO_FILES[@]}" -eq 0 ]; then
+              echo "Downloaded file not found."
+              FAILED=$((FAILED + 1))
+              echo "$URL" >> "$FAILED_FILE"
+              continue
+            fi
 
-          echo "success=$SUCCESS" >> "$GITHUB_OUTPUT"
-          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
-
-          if [ "$SUCCESS" -eq 0 ]; then
-            echo "No new video was downloaded successfully."
-            exit 1
-          fi
-
-      - name: Create AES-256 ZIP archives
-        if: success()
-        run: |
-          set -e
-
-          mkdir -p ShizzleAI_Videos
-          shopt -s nullglob
-
-          for FILE in temp_downloads/*; do
-            [ -f "$FILE" ] || continue
-
-            case "$FILE" in
-              *.mp4|*.mkv|*.webm|*.mov|*.avi) ;;
-              *) continue ;;
-            esac
-
+            FILE="${VIDEO_FILES[0]}"
             BASENAME=$(basename "$FILE")
             NAME="${BASENAME%.*}"
-            ZIP_PATH="ShizzleAI_Videos/${NAME}.zip"
+            ZIP_PATH="$PAGE_DIR/${NAME}.zip"
 
-            echo "Creating AES-256 ZIP: $ZIP_PATH"
+            echo "Downloaded: $BASENAME"
+
+            # Create AES-256 ZIP
+            echo "Creating encrypted ZIP..."
 
             rm -f "$ZIP_PATH" "$ZIP_PATH".part-*
 
-            7z a \
+            if ! 7z a \
               -tzip \
               "-p${ZIP_PASSWORD}" \
               -mem=AES256 \
               -mx=0 \
               -y \
               "$ZIP_PATH" \
-              "$FILE"
+              "$FILE"; then
 
-            7z t "-p${ZIP_PASSWORD}" "$ZIP_PATH"
+              echo "ZIP creation failed."
+              FAILED=$((FAILED + 1))
+              echo "$URL" >> "$FAILED_FILE"
+              continue
+            fi
 
-            split -b 45M -d -a 3 \
+            # Verify ZIP
+            if ! 7z t "-p${ZIP_PASSWORD}" "$ZIP_PATH"; then
+              echo "ZIP verification failed."
+              rm -f "$ZIP_PATH"
+              FAILED=$((FAILED + 1))
+              echo "$URL" >> "$FAILED_FILE"
+              continue
+            fi
+
+            # Split into 45 MB parts
+            echo "Splitting ZIP..."
+
+            if ! split -b 45M -d -a 3 \
               "$ZIP_PATH" \
-              "$ZIP_PATH.part-"
+              "$ZIP_PATH.part-"; then
 
-            rm -f "$ZIP_PATH"
+              echo "ZIP splitting failed."
+              rm -f "$ZIP_PATH" "$ZIP_PATH".part-*
+              FAILED=$((FAILED + 1))
+              echo "$URL" >> "$FAILED_FILE"
+              continue
+            fi
 
-            cat > "ShizzleAI_Videos/${NAME}_README.txt" <<EOF
+            # Verify split files exist
+            PARTS=( "$ZIP_PATH".part-* )
+
+            if [ "${#PARTS[@]}" -eq 0 ]; then
+              echo "No ZIP parts created."
+              FAILED=$((FAILED + 1))
+              echo "$URL" >> "$FAILED_FILE"
+              continue
+            fi
+
+            # Remove original ZIP and downloaded video
+            rm -f "$ZIP_PATH" "$FILE"
+
+            # Create README for this video
+            cat > "$PAGE_DIR/${NAME}_README.txt" <<EOF
           Video: $BASENAME
           Encryption: AES-256
           Split size: 45 MB
 
-          Extraction:
-          1. Keep all parts in the same folder.
-          2. Run:
-             cat "${NAME}.zip.part-"* > "${NAME}.zip"
-          3. Open the reconstructed ZIP with 7-Zip.
-          4. Enter your ZIP password.
+          Reassemble on Linux:
+          cat "${NAME}.zip.part-"* > "${NAME}.zip"
+
+          Open the reconstructed ZIP using 7-Zip and enter the password.
           EOF
 
-            echo "Archive completed:"
+            echo "ZIP parts created:"
             ls -lh "$ZIP_PATH".part-*
-          done
 
-      - name: Generate report
+            # Add only this video's files and archive record
+            git add "$PAGE_DIR"
+
+            if git diff --cached --quiet; then
+              echo "No staged changes found."
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+
+            # Commit this video separately
+            git commit -m "Add ShizzleAI video ${VIDEO_ID}"
+
+            echo "Pushing video ${VIDEO_ID}..."
+
+            ATTEMPT=1
+            PUSHED=false
+
+            while [ "$ATTEMPT" -le "$MAX_RETRIES" ]; do
+              echo "Push attempt $ATTEMPT of $MAX_RETRIES"
+
+              if git -c http.postBuffer=524288000 \
+                     -c http.version=HTTP/1.1 \
+                     push origin "HEAD:${BRANCH}"; then
+
+                PUSHED=true
+                break
+              fi
+
+              echo "Push failed."
+
+              # Check whether remote branch moved.
+              if ! git fetch origin "$BRANCH"; then
+                echo "Fetch failed. Retrying same commit."
+              else
+                LOCAL_HEAD=$(git rev-parse HEAD)
+                REMOTE_HEAD=$(git rev-parse "origin/${BRANCH}")
+
+                if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+                  if git merge-base --is-ancestor "$LOCAL_HEAD" "$REMOTE_HEAD"; then
+                    echo "Remote already contains this commit."
+                    PUSHED=true
+                    break
+                  fi
+
+                  if git merge-base --is-ancestor "$REMOTE_HEAD" "$LOCAL_HEAD"; then
+                    echo "Local commit is ahead. Retrying push."
+                  else
+                    echo "Remote has independent changes. Rebasing..."
+                    if ! git rebase "origin/${BRANCH}"; then
+                      echo "Rebase failed."
+                      git rebase --abort || true
+                      exit 1
+                    fi
+                  fi
+                fi
+              fi
+
+              WAIT_TIME=$((ATTEMPT * 10))
+              echo "Waiting ${WAIT_TIME} seconds..."
+              sleep "$WAIT_TIME"
+
+              ATTEMPT=$((ATTEMPT + 1))
+            done
+
+            if [ "$PUSHED" != "true" ]; then
+              echo "Push failed after all retries."
+              exit 1
+            fi
+
+            SUCCESS=$((SUCCESS + 1))
+            echo "Video ${VIDEO_ID} successfully pushed."
+
+          done < video_links.txt
+
+          # Save summary
+          echo "success=$SUCCESS" >> "$GITHUB_OUTPUT"
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+          echo "skipped=$SKIPPED" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "======================================"
+          echo "FINAL SUMMARY"
+          echo "Processed: $TOTAL"
+          echo "Successfully pushed: $SUCCESS"
+          echo "Skipped: $SKIPPED"
+          echo "Failed: $FAILED"
+          echo "======================================"
+
+          if [ "$SUCCESS" -eq 0 ] && [ "$SKIPPED" -eq 0 ]; then
+            echo "No video was successfully processed."
+            exit 1
+          fi
+
+      - name: Generate page report
         if: always()
         run: |
-          cat > ShizzleAI_Videos/README.md <<EOF
-          # ShizzleAI Downloads
+          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          mkdir -p "$PAGE_DIR"
 
-          - Starting URL: ${START_URL}
-          - Successful downloads: ${{ steps.download.outputs.success }}
-          - Failed downloads: ${{ steps.download.outputs.failed }}
+          cat > "$PAGE_DIR/README.md" <<EOF
+          # ShizzleAI - Page ${PAGE_NUMBER}
+
+          - Page: ${PAGE_NUMBER}
+          - Test mode: ${TEST_ONLY}
+          - Successfully pushed: ${{ steps.download.outputs.success }}
+          - Skipped: ${{ steps.download.outputs.skipped }}
+          - Failed: ${{ steps.download.outputs.failed }}
+          - Archive format: ZIP
           - Encryption: AES-256
-          - Split size: 45 MB
+          - Archive volume size: 45 MB
 
-          Each video is stored in its own encrypted ZIP archive.
+          Each video has its own encrypted ZIP archive.
+          Keep all split archive parts together when extracting.
           EOF
 
           echo "Generated files:"
-          find ShizzleAI_Videos -maxdepth 1 -type f -printf '%f\n' | sort
+          find "$PAGE_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
 
-      - name: Commit and push with retries
+      - name: Commit and push page report
         if: always()
         run: |
           set +e
 
+          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
           BRANCH="${GITHUB_REF_NAME}"
-          MAX_RETRIES=8
-          ATTEMPT=1
 
-          git add ShizzleAI_Videos failed.txt 2>/dev/null || true
+          git add "$PAGE_DIR/README.md" "$PAGE_DIR/failed.txt"
 
           if git diff --cached --quiet; then
-            echo "Nothing to commit."
+            echo "No report changes."
             exit 0
           fi
 
-          git commit -m "Add ShizzleAI video downloads"
+          git commit -m "Update ShizzleAI page ${PAGE_NUMBER} report" || exit 1
 
-          if [ $? -ne 0 ]; then
-            echo "Commit failed."
-            exit 1
-          fi
+          ATTEMPT=1
+          MAX_RETRIES=8
 
           while [ "$ATTEMPT" -le "$MAX_RETRIES" ]; do
-            echo "Push attempt $ATTEMPT of $MAX_RETRIES"
-
-            git -c http.postBuffer=524288000 \
-                -c http.version=HTTP/1.1 \
-                push origin "HEAD:${BRANCH}"
-
-            if [ $? -eq 0 ]; then
-              echo "Push successful."
+            if git push origin "HEAD:${BRANCH}"; then
+              echo "Report pushed successfully."
               exit 0
             fi
 
-            echo "Push failed. Fetching remote changes..."
+            echo "Report push failed. Fetching remote..."
+            git fetch origin "$BRANCH" || true
 
-            git fetch origin "$BRANCH"
-
-            if [ $? -eq 0 ]; then
-              git rebase "origin/${BRANCH}"
-
-              if [ $? -ne 0 ]; then
-                echo "Rebase failed."
-                git rebase --abort
-              fi
+            if ! git rebase "origin/${BRANCH}"; then
+              git rebase --abort || true
             fi
 
-            WAIT_TIME=$((ATTEMPT * 10))
-            sleep "$WAIT_TIME"
+            sleep $((ATTEMPT * 10))
             ATTEMPT=$((ATTEMPT + 1))
           done
 
-          echo "Push failed after all retries."
+          echo "Could not push page report."
           exit 1
 
       - name: Upload debug information
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shizzleai-debug
+          name: shizzleai-debug-page-${{ inputs.page_number }}
           path: |
             debug/
             video_links.txt
-            failed.txt
           if-no-files-found: ignore
           retention-days: 3
-
