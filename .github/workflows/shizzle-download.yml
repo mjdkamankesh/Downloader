@@ -1,5 +1,5 @@
 
-name: ShizzleAI Pages 1-6 Downloader
+name: ShizzleAI Pages 1-6 Downloader New
 
 on:
   workflow_dispatch:
