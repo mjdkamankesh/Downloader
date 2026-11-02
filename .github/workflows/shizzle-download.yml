@@ -280,8 +280,9 @@ jobs:
           fi
 
       
+      
       - name: Create AES-256 ZIP archives
-        if: always()
+        if: success()
         run: |
           set -e
 
@@ -294,47 +295,58 @@ jobs:
             [ -f "$FILE" ] || continue
 
             case "$FILE" in
-              *.mp4|*.mkv|*.webm|*.mov|*.avi)
-                ;;
-              *)
-                continue
-                ;;
+              *.mp4|*.mkv|*.webm|*.mov|*.avi) ;;
+              *) continue ;;
             esac
 
             BASENAME=$(basename "$FILE")
             NAME="${BASENAME%.*}"
             ZIP_PATH="$PAGE_DIR/${NAME}.zip"
 
-            echo "Preparing archive: $ZIP_PATH"
+            echo "Creating AES-256 ZIP: $ZIP_PATH"
 
-            # Remove previous archive and all its split volumes
-            rm -f "$ZIP_PATH" "$ZIP_PATH".*
+            # Remove old archive and parts
+            rm -f "$ZIP_PATH" "$ZIP_PATH".part-*
 
-            # Create encrypted split archive
+            # Create a standard encrypted ZIP
             7z a \
               -tzip \
-              "$ZIP_PATH" \
-              "$FILE" \
-              -v45m \
               "-p${ZIP_PASSWORD}" \
               -mem=AES256 \
               -mx=0 \
-              -y
+              -y \
+              "$ZIP_PATH" \
+              "$FILE"
 
-            echo "Archive created successfully."
+            # Verify archive integrity
+            7z t "-p${ZIP_PASSWORD}" "$ZIP_PATH"
+
+            # Split ZIP into 45 MiB pieces
+            split -b 45M -d -a 3 \
+              "$ZIP_PATH" \
+              "$ZIP_PATH.part-"
+
+            # Remove original ZIP, keep only split parts
+            rm -f "$ZIP_PATH"
 
             cat > "$PAGE_DIR/${NAME}_README.txt" <<EOF
           Video: $BASENAME
-          Archive: ${NAME}.zip
           Encryption: AES-256
           Split size: 45 MB
-          Password: The password entered when starting the workflow.
-          Extraction: Keep all ZIP volume parts together before extraction.
+
+          Extraction:
+          1. Keep all parts in the same folder.
+          2. Run:
+             cat "${NAME}.zip.part-"* > "${NAME}.zip"
+          3. Open the reconstructed ZIP with 7-Zip.
+          4. Enter the password used during workflow execution.
           EOF
+
+            echo "Archive completed:"
+            ls -lh "$ZIP_PATH".part-*
           done
 
-          echo "All archives completed."
-
+          echo "All ZIP archives created and split successfully."
 
       - name: Generate page report
         if: always()
