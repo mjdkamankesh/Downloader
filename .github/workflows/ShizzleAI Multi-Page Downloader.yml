@@ -1,4 +1,3 @@
-```yaml
 name: ShizzleAI Auto Downloader
 
 on:
@@ -431,4 +430,4 @@ jobs:
             failed.txt
           if-no-files-found: ignore
           retention-days: 3
-```
+
