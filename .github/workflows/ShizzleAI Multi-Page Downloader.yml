@@ -79,7 +79,7 @@ jobs:
       # --------------------------------------------------
       # Scrape all pagination pages
       # --------------------------------------------------
-            - name: Extract video links from all pages
+      - name: Extract video links from all pages
         shell: bash
         run: |
           cat > extract_links.py <<'PY'
