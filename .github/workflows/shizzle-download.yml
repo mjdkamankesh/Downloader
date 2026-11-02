@@ -1,10 +1,11 @@
-name: ShizzleAI Page Downloader
+
+name: ShizzleAI Pages 1-6 Downloader
 
 on:
   workflow_dispatch:
     inputs:
       page_number:
-        description: "Page number (1-6)"
+        description: "Select page"
         required: true
         type: choice
         options:
@@ -14,9 +15,16 @@ on:
           - "4"
           - "5"
           - "6"
+        default: "1"
+
+      test_only:
+        description: "Test mode: download only one video"
+        required: true
+        type: boolean
+        default: true
 
       zip_password:
-        description: "ZIP password"
+        description: "Password for AES-256 ZIP files"
         required: true
         type: string
 
@@ -24,7 +32,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: shizzle-page-${{ inputs.page_number }}
+  group: shizzleai-download-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -34,22 +42,42 @@ jobs:
 
     env:
       PAGE_NUMBER: ${{ inputs.page_number }}
+      TEST_ONLY: ${{ inputs.test_only }}
       ZIP_PASSWORD: ${{ inputs.zip_password }}
       START_URL: https://rule34gen.com/search/shizzleai-/?sort_by=post_date
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git config http.version HTTP/1.1
+          git config http.postBuffer 524288000
+          git config http.maxRequestBuffer 100M
+          git config core.compression 0
+          git config pack.windowMemory 100m
+          git config pack.packSizeLimit 100m
+          git config pack.threads 1
 
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip p7zip-full git
+          sudo apt-get install -y \
+            aria2 \
+            p7zip-full \
+            git \
+            unzip \
+            ffmpeg
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -57,168 +85,157 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install playwright yt-dlp pyzipper
-          playwright install --with-deps chromium
+
+      - name: Install Chromium
+        run: |
+          python -m playwright install --with-deps chromium
 
       - name: Prepare folders
         run: |
-          mkdir -p "ShizzleAI_Videos/Page_${PAGE_NUMBER}"
           mkdir -p temp_downloads
           mkdir -p debug
+          mkdir -p "ShizzleAI_Videos/Page_${PAGE_NUMBER}"
 
-      - name: Extract page video links
+          echo "Selected page: ${PAGE_NUMBER}"
+          echo "Test mode: ${TEST_ONLY}"
+
+      - name: Extract video links
         run: |
           cat > extract_links.py <<'PY'
           import os
-          from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
           from playwright.sync_api import sync_playwright
 
-          start_url = os.environ["START_URL"]
           page_number = int(os.environ["PAGE_NUMBER"])
+          start_url = os.environ["START_URL"]
 
-          def make_page_url(url, number):
-              parts = urlparse(url)
-              query = parse_qs(parts.query)
-              query["page"] = [str(number)]
-              return urlunparse(
-                  parts._replace(query=urlencode(query, doseq=True))
-              )
+          if page_number == 1:
+              url = start_url
+          else:
+              separator = "&" if "?" in start_url else "?"
+              url = f"{start_url}{separator}page={page_number}"
 
-          target_url = make_page_url(start_url, page_number)
-
-          print("Opening:", target_url)
+          print(f"Opening: {url}")
 
           links = []
 
           with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True)
+              browser = p.chromium.launch(
+                  headless=True,
+                  args=["--no-sandbox", "--disable-dev-shm-usage"]
+              )
 
-              page = browser.new_page(
-                  viewport={"width": 1920, "height": 1080},
+              context = browser.new_context(
                   user_agent=(
-                      "Mozilla/5.0 (X11; Linux x86_64) "
-                      "AppleWebKit/537.36 Chrome/120 Safari/537.36"
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36"
                   )
               )
 
-              response = page.goto(
-                  target_url,
-                  wait_until="domcontentloaded",
-                  timeout=120000
-              )
-
-              print(
-                  "HTTP status:",
-                  response.status if response else "unknown"
-              )
-
-              page.wait_for_timeout(10000)
+              page = context.new_page()
+              page.set_default_timeout(30000)
 
               try:
-                  page.locator(
-                      "a.th.js-open-popup"
-                  ).first.wait_for(timeout=15000)
-              except Exception:
-                  pass
-
-              page.screenshot(
-                  path=f"debug/page_{page_number}.png",
-                  full_page=True
-              )
-
-              with open(
-                  f"debug/page_{page_number}.html",
-                  "w",
-                  encoding="utf-8"
-              ) as f:
-                  f.write(page.content())
-
-              selectors = [
-                  "a.th.js-open-popup[href]",
-                  "a[href*='/video/']"
-              ]
-
-              for selector in selectors:
-                  found = page.locator(selector).evaluate_all(
-                      "(els) => els.map(e => e.href)"
+                  page.goto(
+                      url,
+                      wait_until="domcontentloaded",
+                      timeout=120000
                   )
-                  links.extend(found)
+                  page.wait_for_timeout(10000)
 
-              links = list(dict.fromkeys(
-                  urljoin(target_url, x)
-                  for x in links
-                  if "/video/" in x
-              ))
+                  page.screenshot(
+                      path="debug/page.png",
+                      full_page=True
+                  )
 
-              browser.close()
+                  with open("debug/page.html", "w", encoding="utf-8") as f:
+                      f.write(page.content())
 
-          if not links:
-              raise SystemExit(
-                  f"No video links found on page {page_number}"
-              )
+                  selectors = [
+                      "a.th.js-open-popup[href]",
+                      "a[href*='/video/']"
+                  ]
 
-          with open(
-              "page_links.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              f.write("\n".join(links) + "\n")
+                  for selector in selectors:
+                      elements = page.locator(selector).all()
 
-          print("=" * 45)
-          print(f"PAGE: {page_number}")
-          print(f"TOTAL VIDEOS FOUND: {len(links)}")
-          print("=" * 45)
+                      for element in elements:
+                          href = element.get_attribute("href")
 
-          for index, link in enumerate(links, 1):
-              print(f"{index}/{len(links)} - {link}")
+                          if not href:
+                              continue
+
+                          if href.startswith("/"):
+                              href = "https://rule34gen.com" + href
+
+                          if "/video/" in href and href not in links:
+                              links.append(href)
+
+              except Exception as e:
+                  print(f"Page extraction error: {e}")
+                  page.screenshot(
+                      path="debug/error.png",
+                      full_page=True
+                  )
+
+              finally:
+                  browser.close()
+
+          with open("video_links.txt", "w", encoding="utf-8") as f:
+              for link in links:
+                  f.write(link + "\n")
+
+          print(f"Found {len(links)} video links")
           PY
 
           python extract_links.py
 
-      - name: Download videos
-        shell: bash
+          if [ ! -s video_links.txt ]; then
+            echo "No video links found."
+            exit 1
+          fi
+
+          echo "Extracted links:"
+          cat video_links.txt
+
+      - name: Download videos with Aria2
+        id: download
         run: |
+          set +e
+
           PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
-          ARCHIVE="$PAGE_DIR/downloaded.txt"
+          mkdir -p "$PAGE_DIR"
+          mkdir -p temp_downloads
+
+          if [ "$TEST_ONLY" = "true" ]; then
+            ARCHIVE="$RUNNER_TEMP/shizzle-test-archive.txt"
+            echo "TEST MODE: only the first video will be downloaded."
+          else
+            ARCHIVE="$PAGE_DIR/downloaded.txt"
+            touch "$ARCHIVE"
+            echo "FULL MODE: downloading all available videos."
+          fi
 
           touch "$ARCHIVE"
-          touch "$PAGE_DIR/failed.txt"
 
-          TOTAL=$(awk 'NF {count++} END {print count+0}' page_links.txt)
-
-          CURRENT=0
           SUCCESS=0
           FAILED=0
-          SKIPPED=0
+          TOTAL=0
 
-          echo "=========================================="
-          echo "PAGE: ${PAGE_NUMBER}"
-          echo "TOTAL VIDEOS: ${TOTAL}"
-          echo "DOWNLOAD CONNECTIONS: 4"
-          echo "=========================================="
-
-          while IFS= read -r URL; do
+          while IFS= read -r URL || [ -n "$URL" ]; do
             [ -z "$URL" ] && continue
 
-            CURRENT=$((CURRENT + 1))
+            TOTAL=$((TOTAL + 1))
 
-            VIDEO_ID=$(echo "$URL" | sed -nE 's#.*video/([0-9]+).*#\1#p')
+            if [ "$TEST_ONLY" = "true" ] && [ "$TOTAL" -gt 1 ]; then
+              break
+            fi
 
             echo ""
-            echo "##########################################"
-            echo "PAGE: ${PAGE_NUMBER}"
-            echo "VIDEO: ${CURRENT}/${TOTAL}"
-            echo "SUCCESS: ${SUCCESS}"
-            echo "FAILED: ${FAILED}"
-            echo "REMAINING: $((TOTAL - CURRENT))"
-            echo "VIDEO ID: ${VIDEO_ID}"
-            echo "URL: ${URL}"
-            echo "##########################################"
-
-            if grep -q " ${VIDEO_ID}$" "$ARCHIVE" 2>/dev/null; then
-              SKIPPED=$((SKIPPED + 1))
-              echo "RESULT: ALREADY DOWNLOADED"
-              continue
-            fi
+            echo "======================================"
+            echo "Video $TOTAL"
+            echo "$URL"
+            echo "======================================"
 
             if yt-dlp \
               --no-overwrites \
@@ -226,133 +243,200 @@ jobs:
               --retries 10 \
               --fragment-retries 10 \
               --file-access-retries 10 \
+              --extractor-retries 5 \
               --socket-timeout 60 \
               --continue \
-              -N 4 \
+              --downloader aria2c \
+              --downloader-args "aria2c:-x 16 -s 16 -k 1M --file-allocation=none --retry-wait=5 --max-tries=10 --connect-timeout=30 --timeout=60" \
               -f "bestvideo+bestaudio/best" \
               --merge-output-format mp4 \
               -o "temp_downloads/%(title).150B_%(id)s.%(ext)s" \
               "$URL"; then
 
-                SUCCESS=$((SUCCESS + 1))
-                echo "RESULT: SUCCESS"
+              SUCCESS=$((SUCCESS + 1))
+              echo "RESULT: SUCCESS"
 
             else
-                FAILED=$((FAILED + 1))
-                echo "$URL" >> "$PAGE_DIR/failed.txt"
-                echo "RESULT: FAILED"
+              FAILED=$((FAILED + 1))
+              echo "$URL" >> "$PAGE_DIR/failed.txt"
+              echo "RESULT: FAILED"
             fi
 
-            echo ""
-            echo "========== OVERALL PROGRESS =========="
-            echo "VIDEO: ${CURRENT}/${TOTAL}"
-            echo "SUCCESS: ${SUCCESS}"
-            echo "FAILED: ${FAILED}"
-            echo "SKIPPED: ${SKIPPED}"
-            echo "REMAINING: $((TOTAL - CURRENT))"
-            echo "======================================="
-
-          done < page_links.txt
+          done < video_links.txt
 
           echo ""
-          echo "=========================================="
-          echo "DOWNLOAD PROCESS FINISHED"
-          echo "TOTAL: ${TOTAL}"
-          echo "SUCCESS: ${SUCCESS}"
-          echo "FAILED: ${FAILED}"
-          echo "SKIPPED: ${SKIPPED}"
-          echo "=========================================="
+          echo "======================================"
+          echo "Download summary"
+          echo "Successful: $SUCCESS"
+          echo "Failed: $FAILED"
+          echo "======================================"
 
-      - name: Create encrypted ZIP
+          echo "success=$SUCCESS" >> "$GITHUB_OUTPUT"
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+
+          if [ "$SUCCESS" -eq 0 ]; then
+            echo "No video was downloaded successfully."
+            exit 1
+          fi
+
+      - name: Create AES-256 ZIP archives
+        if: always()
         run: |
-          python - <<'PY'
-          import os
-          import glob
-          import pyzipper
+          set -e
 
-          page = os.environ["PAGE_NUMBER"]
-          password = os.environ["ZIP_PASSWORD"].encode("utf-8")
+          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          mkdir -p "$PAGE_DIR"
 
-          output = (
-              f"ShizzleAI_Videos/Page_{page}/"
-              f"ShizzleAI_Page_{page}.zip"
-          )
+          shopt -s nullglob
 
-          files = glob.glob("temp_downloads/*")
-          files = [f for f in files if os.path.isfile(f)]
+          for FILE in temp_downloads/*; do
+            [ -f "$FILE" ] || continue
 
-          if not files:
-              raise SystemExit("No downloaded videos found.")
+            case "$FILE" in
+              *.mp4|*.mkv|*.webm|*.mov|*.avi)
+                ;;
+              *)
+                continue
+                ;;
+            esac
 
-          with pyzipper.AESZipFile(
-              output,
-              "w",
-              compression=pyzipper.ZIP_DEFLATED,
-              encryption=pyzipper.WZ_AES
-          ) as zf:
+            BASENAME=$(basename "$FILE")
+            NAME="${BASENAME%.*}"
+            ZIP_PATH="$PAGE_DIR/$NAME.zip"
 
-              zf.setpassword(password)
-              zf.setencryption(
-                  pyzipper.WZ_AES,
-                  nbits=256
-              )
+            echo "Creating encrypted archive: $ZIP_PATH"
 
-              for file in files:
-                  print("Adding:", file)
-                  zf.write(file, os.path.basename(file))
+            7z a \
+              -tzip \
+              -v45m \
+              -p"${ZIP_PASSWORD}" \
+              -mem=AES256 \
+              -mx=0 \
+              "$ZIP_PATH" \
+              "$FILE"
 
-          print("Created:", output)
-          PY
+            if [ $? -eq 0 ]; then
+              echo "Archive created successfully."
 
-      - name: Split ZIP into 45 MB parts
+              cat > "$PAGE_DIR/${NAME}_README.txt" <<EOF
+          Video: $BASENAME
+          Archive: $NAME.zip
+          Encryption: AES-256
+          Split size: 45 MB
+          Password: The password entered when starting the workflow.
+          Extraction: Keep all ZIP volume parts together before extraction.
+          EOF
+            else
+              echo "Archive creation failed for $FILE"
+              exit 1
+            fi
+          done
+
+          echo "Archive creation completed."
+
+      - name: Generate page report
+        if: always()
         run: |
           PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
-          ZIP_FILE="$PAGE_DIR/ShizzleAI_Page_${PAGE_NUMBER}.zip"
+          mkdir -p "$PAGE_DIR"
 
-          split -b 45M -d -a 3 \
-            "$ZIP_FILE" \
-            "$PAGE_DIR/ShizzleAI_Page_${PAGE_NUMBER}.part-"
+          cat > "$PAGE_DIR/README.md" <<EOF
+          # ShizzleAI - Page ${PAGE_NUMBER}
 
-          rm "$ZIP_FILE"
+          - Page: ${PAGE_NUMBER}
+          - Test mode: ${TEST_ONLY}
+          - Downloaded successfully: ${{ steps.download.outputs.success }}
+          - Failed downloads: ${{ steps.download.outputs.failed }}
+          - Archive format: ZIP
+          - Encryption: AES-256
+          - Archive volume size: 45 MB
 
-          echo "Archive parts:"
-          ls -lh "$PAGE_DIR"
+          ## Important
 
-      - name: Save page links and report
+          Each video has its own encrypted ZIP archive.
+          Keep all split archive parts together when extracting.
+          EOF
+
+          echo ""
+          echo "Generated files:"
+          find "$PAGE_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Prepare files for Git
+        if: always()
         run: |
-          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          git add "ShizzleAI_Videos/Page_${PAGE_NUMBER}"
 
-          cp page_links.txt "$PAGE_DIR/video_links.txt"
+          if ! git diff --cached --quiet; then
+            git status --short
+          else
+            echo "No repository changes to commit."
+          fi
 
-          {
-            echo "Page: ${PAGE_NUMBER}"
-            echo "Total links: $(wc -l < page_links.txt)"
-            echo "Downloaded archive entries: $(wc -l < "$PAGE_DIR/downloaded.txt")"
-            echo "Failed links: $(wc -l < "$PAGE_DIR/failed.txt")"
-            echo "Date: $(date -u)"
-          } > "$PAGE_DIR/report.txt"
-
-      - name: Commit and push page files
+      - name: Commit and push with retries
+        if: always()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          set +e
+
+          BRANCH="${GITHUB_REF_NAME}"
+          MAX_RETRIES=8
+          ATTEMPT=1
 
           git add "ShizzleAI_Videos/Page_${PAGE_NUMBER}"
 
-          git commit -m "Add ShizzleAI page ${PAGE_NUMBER}" || {
-            echo "Nothing new to commit"
-          }
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
 
-          git pull --rebase origin "${GITHUB_REF_NAME}"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git commit -m "Add ShizzleAI page ${PAGE_NUMBER} downloads"
 
-      - name: Upload debug files
+          if [ $? -ne 0 ]; then
+            echo "Commit failed."
+            exit 1
+          fi
+
+          while [ "$ATTEMPT" -le "$MAX_RETRIES" ]; do
+            echo "Push attempt $ATTEMPT of $MAX_RETRIES"
+
+            git -c http.postBuffer=524288000 \
+                -c http.version=HTTP/1.1 \
+                push origin "HEAD:${BRANCH}"
+
+            if [ $? -eq 0 ]; then
+              echo "Push successful."
+              exit 0
+            fi
+
+            echo "Push failed. Fetching remote changes..."
+
+            git fetch origin "$BRANCH"
+
+            if [ $? -eq 0 ]; then
+              git rebase "origin/${BRANCH}"
+
+              if [ $? -ne 0 ]; then
+                echo "Rebase failed. Trying to abort..."
+                git rebase --abort
+              fi
+            fi
+
+            WAIT_TIME=$((ATTEMPT * 10))
+            echo "Waiting ${WAIT_TIME} seconds before retry..."
+            sleep "$WAIT_TIME"
+
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+
+          echo "Push failed after all retries."
+          exit 1
+
+      - name: Upload debug information
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
-          name: shizzle-page-${{ inputs.page_number }}-debug
+          name: shizzleai-debug-page-${{ inputs.page_number }}
           path: |
             debug/
-            page_links.txt
+            video_links.txt
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 3
