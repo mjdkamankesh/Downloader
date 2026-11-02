@@ -1,18 +1,25 @@
-name: ShizzleAI Pages 2-6 Queue
+name: ShizzleAI Pages 1-6 Queue
 
 on:
   workflow_dispatch:
     inputs:
       page_number:
-        description: "Page number (2-6)"
+        description: "Page number (1-6)"
         required: true
         type: choice
         options:
+          - "1"
           - "2"
           - "3"
           - "4"
           - "5"
           - "6"
+
+      test_only:
+        description: "Test mode: download only one video"
+        required: true
+        type: boolean
+        default: true
 
       zip_password:
         description: "ZIP password"
@@ -23,7 +30,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: shizzleai-pages-2-6-queue
+  group: shizzleai-pages-1-6-queue
   queue: max
 
 jobs:
@@ -33,6 +40,7 @@ jobs:
 
     env:
       PAGE_NUMBER: ${{ inputs.page_number }}
+      TEST_ONLY: ${{ inputs.test_only }}
       ZIP_PASSWORD: ${{ inputs.zip_password }}
       START_URL: https://rule34gen.com/search/shizzleai-/?sort_by=post_date
 
@@ -42,10 +50,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Configure Git
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global http.maxRequestBuffer 100M
+          git config --global core.compression 0
+          git config --global pack.windowMemory 256m
+          git config --global pack.packSizeLimit 100m
+          git config --global pack.threads 1
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip p7zip-full git
+          sudo apt-get install -y p7zip-full git
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -55,7 +75,7 @@ jobs:
       - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
-          pip install playwright yt-dlp pyzipper
+          pip install playwright yt-dlp
           playwright install --with-deps chromium
 
       - name: Prepare folders
@@ -63,6 +83,10 @@ jobs:
           mkdir -p "ShizzleAI_Videos/Page_${PAGE_NUMBER}"
           mkdir -p temp_downloads
           mkdir -p debug
+
+      # --------------------------------------------------
+      # Extract video links
+      # --------------------------------------------------
 
       - name: Extract page video links
         run: |
@@ -83,12 +107,14 @@ jobs:
               )
 
           target_url = make_page_url(start_url, page_number)
+
           print("Opening:", target_url)
 
           links = []
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
+
               page = browser.new_page(
                   viewport={"width": 1920, "height": 1080},
                   user_agent=(
@@ -115,7 +141,7 @@ jobs:
                       "a.th.js-open-popup"
                   ).first.wait_for(timeout=15000)
               except Exception:
-                  print("Primary video selector did not appear before timeout.")
+                  print("Primary video selector did not appear.")
 
               page.screenshot(
                   path=f"debug/page_{page_number}.png",
@@ -129,8 +155,6 @@ jobs:
               ) as f:
                   f.write(page.content())
 
-              # Keep the exact selectors and extraction logic from the
-              # known-working single-page workflow.
               selectors = [
                   "a.th.js-open-popup[href]",
                   "a[href*='/video/']"
@@ -140,13 +164,14 @@ jobs:
                   found = page.locator(selector).evaluate_all(
                       "(els) => els.map(e => e.href)"
                   )
-                  print(f"Selector {selector}: {len(found)} matches")
+
+                  print(f"{selector}: {len(found)} matches")
                   links.extend(found)
 
               links = list(dict.fromkeys(
-                  urljoin(target_url, x)
-                  for x in links
-                  if "/video/" in x
+                  urljoin(target_url, link)
+                  for link in links
+                  if "/video/" in link
               ))
 
               browser.close()
@@ -156,11 +181,7 @@ jobs:
                   f"No video links found on page {page_number}"
               )
 
-          with open(
-              "page_links.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
+          with open("page_links.txt", "w", encoding="utf-8") as f:
               f.write("\n".join(links) + "\n")
 
           print("=" * 45)
@@ -174,48 +195,68 @@ jobs:
 
           python extract_links.py
 
+      # --------------------------------------------------
+      # Download videos
+      # --------------------------------------------------
+
       - name: Download videos
         shell: bash
         run: |
-          set -o pipefail
+          set -u
+
           PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
-          ARCHIVE="$PAGE_DIR/downloaded.txt"
+
+          # Test mode uses a temporary archive.
+          # Full mode uses the permanent download archive.
+          if [ "$TEST_ONLY" = "true" ]; then
+            ARCHIVE="$RUNNER_TEMP/shizzle-test-archive.txt"
+            echo "TEST MODE: only the first video will be downloaded."
+          else
+            ARCHIVE="$PAGE_DIR/downloaded.txt"
+            echo "FULL MODE: processing all videos."
+          fi
 
           touch "$ARCHIVE"
           touch "$PAGE_DIR/failed.txt"
 
           TOTAL=$(awk 'NF {count++} END {print count+0}' page_links.txt)
 
+          if [ "$TEST_ONLY" = "true" ]; then
+            LIMIT=1
+          else
+            LIMIT="$TOTAL"
+          fi
+
           CURRENT=0
           SUCCESS=0
           FAILED=0
           SKIPPED=0
 
-          echo "=========================================="
-          echo "PAGE: ${PAGE_NUMBER}"
-          echo "TOTAL VIDEOS: ${TOTAL}"
-          echo "DOWNLOAD CONNECTIONS: 4"
-          echo "=========================================="
+          echo "Page: ${PAGE_NUMBER}"
+          echo "Videos found: ${TOTAL}"
+          echo "Videos to process: ${LIMIT}"
 
           while IFS= read -r URL; do
             [ -z "$URL" ] && continue
+
             CURRENT=$((CURRENT + 1))
+
+            if [ "$CURRENT" -gt "$LIMIT" ]; then
+              break
+            fi
+
             VIDEO_ID=$(echo "$URL" | sed -nE 's#.*video/([0-9]+).*#\1#p')
 
             echo ""
-            echo "##########################################"
-            echo "PAGE: ${PAGE_NUMBER}"
-            echo "VIDEO: ${CURRENT}/${TOTAL}"
-            echo "SUCCESS: ${SUCCESS}"
-            echo "FAILED: ${FAILED}"
-            echo "REMAINING: $((TOTAL - CURRENT))"
+            echo "=========================================="
+            echo "VIDEO: ${CURRENT}/${LIMIT}"
             echo "VIDEO ID: ${VIDEO_ID}"
             echo "URL: ${URL}"
-            echo "##########################################"
+            echo "=========================================="
 
-            if grep -q " ${VIDEO_ID}$" "$ARCHIVE" 2>/dev/null; then
+            if [ -n "$VIDEO_ID" ] && grep -q " ${VIDEO_ID}$" "$ARCHIVE" 2>/dev/null; then
               SKIPPED=$((SKIPPED + 1))
-              echo "RESULT: ALREADY DOWNLOADED"
+              echo "Already downloaded."
               continue
             fi
 
@@ -232,134 +273,394 @@ jobs:
               --merge-output-format mp4 \
               -o "temp_downloads/%(title).150B_%(id)s.%(ext)s" \
               "$URL"; then
-                SUCCESS=$((SUCCESS + 1))
-                echo "RESULT: SUCCESS"
+
+              SUCCESS=$((SUCCESS + 1))
+              echo "RESULT: SUCCESS"
+
             else
-                FAILED=$((FAILED + 1))
-                echo "$URL" >> "$PAGE_DIR/failed.txt"
-                echo "RESULT: FAILED"
+              FAILED=$((FAILED + 1))
+              echo "$URL" >> "$PAGE_DIR/failed.txt"
+              echo "RESULT: FAILED"
             fi
 
-            echo ""
-            echo "========== OVERALL PROGRESS =========="
-            echo "VIDEO: ${CURRENT}/${TOTAL}"
-            echo "SUCCESS: ${SUCCESS}"
-            echo "FAILED: ${FAILED}"
-            echo "SKIPPED: ${SKIPPED}"
-            echo "REMAINING: $((TOTAL - CURRENT))"
-            echo "======================================="
+            echo "Success: ${SUCCESS}"
+            echo "Failed: ${FAILED}"
+            echo "Skipped: ${SKIPPED}"
+
           done < page_links.txt
 
-          echo ""
-          echo "=========================================="
-          echo "DOWNLOAD PROCESS FINISHED"
-          echo "TOTAL: ${TOTAL}"
-          echo "SUCCESS: ${SUCCESS}"
-          echo "FAILED: ${FAILED}"
-          echo "SKIPPED: ${SKIPPED}"
-          echo "=========================================="
-
-      - name: Create encrypted ZIP
-        if: always()
-        run: |
-          python - <<'PY'
-          import os
-          import glob
-          import pyzipper
-
-          page = os.environ["PAGE_NUMBER"]
-          password = os.environ["ZIP_PASSWORD"].encode("utf-8")
-          output = (
-              f"ShizzleAI_Videos/Page_{page}/"
-              f"ShizzleAI_Page_{page}.zip"
-          )
-
-          files = glob.glob("temp_downloads/*")
-          files = [f for f in files if os.path.isfile(f)]
-
-          if not files:
-              print("No downloaded videos found; ZIP skipped.")
-              raise SystemExit(0)
-
-          with pyzipper.AESZipFile(
-              output,
-              "w",
-              compression=pyzipper.ZIP_DEFLATED,
-              encryption=pyzipper.WZ_AES
-          ) as zf:
-              zf.setpassword(password)
-              zf.setencryption(pyzipper.WZ_AES, nbits=256)
-
-              for file in files:
-                  print("Adding:", file)
-                  zf.write(file, os.path.basename(file))
-
-          print("Created:", output)
-          PY
-
-      - name: Split ZIP into 45 MB parts
-        if: always()
-        run: |
-          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
-          ZIP_FILE="$PAGE_DIR/ShizzleAI_Page_${PAGE_NUMBER}.zip"
-
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "ZIP file not found; splitting skipped."
-            exit 0
+          # In full mode, the permanent archive is kept in the repository.
+          # In test mode, the temporary archive is intentionally discarded.
+          if [ "$TEST_ONLY" != "true" ]; then
+            cp "$ARCHIVE" "$PAGE_DIR/downloaded.txt"
           fi
 
-          split -b 45M -d -a 3 \
-            "$ZIP_FILE" \
-            "$PAGE_DIR/ShizzleAI_Page_${PAGE_NUMBER}.part-"
+          echo ""
+          echo "========== DOWNLOAD SUMMARY =========="
+          echo "Page: ${PAGE_NUMBER}"
+          echo "Found: ${TOTAL}"
+          echo "Success: ${SUCCESS}"
+          echo "Failed: ${FAILED}"
+          echo "Skipped: ${SKIPPED}"
+          echo "Test mode: ${TEST_ONLY}"
+          echo "======================================="
 
-          rm "$ZIP_FILE"
+      # --------------------------------------------------
+      # Create encrypted ZIP files and READMEs
+      # --------------------------------------------------
 
-          echo "Archive parts:"
-          ls -lh "$PAGE_DIR"
-
-      - name: Save page links and report
+      - name: Create encrypted archives and READMEs
         if: always()
+        shell: bash
         run: |
+          set -euo pipefail
+
           PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          BACKUP_DIR="/tmp/shizzle_backup_${GITHUB_RUN_ID}"
+
+          mkdir -p "$BACKUP_DIR"
+
+          echo "$BACKUP_DIR" > /tmp/shizzle_backup_path.txt
+
+          # Save metadata.
+          for META in downloaded.txt failed.txt; do
+            if [ -f "$PAGE_DIR/$META" ]; then
+              cp "$PAGE_DIR/$META" "$BACKUP_DIR/$META"
+            fi
+          done
 
           if [ -f page_links.txt ]; then
-            cp page_links.txt "$PAGE_DIR/video_links.txt"
+            cp page_links.txt "$BACKUP_DIR/video_links.txt"
           fi
 
+          if [ -f debug/page_${PAGE_NUMBER}.png ]; then
+            cp debug/page_${PAGE_NUMBER}.png "$BACKUP_DIR/"
+          fi
+
+          if [ -f debug/page_${PAGE_NUMBER}.html ]; then
+            cp debug/page_${PAGE_NUMBER}.html "$BACKUP_DIR/"
+          fi
+
+          urlencode() {
+            python3 -c \
+              "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" \
+              "$1"
+          }
+
+          VIDEO_COUNT=0
+          SPLIT_SIZE=45m
+
+          shopt -s nullglob
+
+          for FILE in temp_downloads/*; do
+            [ -f "$FILE" ] || continue
+
+            BASENAME=$(basename "$FILE")
+            EXT="${BASENAME##*.}"
+
+            case "$EXT" in
+              jpg|jpeg|png|webp|json|vtt|srt|part)
+                continue
+                ;;
+            esac
+
+            FILENAME_NO_EXT="${BASENAME%.*}"
+
+            FOLDER_NAME=$(
+              echo "$FILENAME_NO_EXT" |
+              sed 's/ /-/g' |
+              sed 's/[^A-Za-z0-9._-]/-/g' |
+              tr -s '-' |
+              sed 's/^-//; s/-$//' |
+              cut -c1-120
+            )
+
+            [ -z "$FOLDER_NAME" ] && FOLDER_NAME="video_${RANDOM}"
+
+            BASE_NAME="$FOLDER_NAME"
+            COUNTER=1
+
+            while [ -d "$BACKUP_DIR/$FOLDER_NAME" ]; do
+              FOLDER_NAME="${BASE_NAME}_${COUNTER}"
+              COUNTER=$((COUNTER + 1))
+            done
+
+            VIDEO_DIR="$BACKUP_DIR/$FOLDER_NAME"
+            mkdir -p "$VIDEO_DIR"
+
+            VIDEO_COUNT=$((VIDEO_COUNT + 1))
+
+            echo "Archiving video: $BASENAME"
+
+            ZIP_BASE="$VIDEO_DIR/${FOLDER_NAME}.zip"
+
+            # Create AES-256 encrypted ZIP.
+            7z a \
+              -tzip \
+              -v${SPLIT_SIZE} \
+              -p"${ZIP_PASSWORD}" \
+              -mem=AES256 \
+              -mx=0 \
+              "$ZIP_BASE" \
+              "$FILE"
+
+            # Find generated ZIP parts.
+            mapfile -t PART_FILES < <(
+              find "$VIDEO_DIR" -maxdepth 1 -type f \
+                -name "${FOLDER_NAME}.zip*" | sort -V
+            )
+
+            if [ "${#PART_FILES[@]}" -eq 0 ]; then
+              echo "ERROR: ZIP parts were not created for $BASENAME"
+              exit 1
+            fi
+
+            TOTAL_SIZE=0
+            LINKS_MD=""
+            PART_COUNT=0
+
+            for PART_FILE in "${PART_FILES[@]}"; do
+              PART_BASENAME=$(basename "$PART_FILE")
+              PART_ENCODED=$(urlencode "$PART_BASENAME")
+
+              PART_SIZE=$(stat -c%s "$PART_FILE")
+              TOTAL_SIZE=$((TOTAL_SIZE + PART_SIZE))
+              PART_COUNT=$((PART_COUNT + 1))
+
+              LINKS_MD="${LINKS_MD}| ${PART_COUNT} | \`${PART_BASENAME}\` | [Download](./${PART_BASENAME}) |"$'\n'
+            done
+
+            TOTAL_SIZE_MB=$(awk \
+              "BEGIN {printf \"%.2f\", ${TOTAL_SIZE}/1024/1024}")
+
+            # Create README for this video.
+            README_FILE="$VIDEO_DIR/README.md"
+
+            {
+              echo "# ${FILENAME_NO_EXT}"
+              echo ""
+              echo "## Video Information"
+              echo ""
+              echo "| Property | Value |"
+              echo "|---|---|"
+              echo "| Page | ${PAGE_NUMBER} |"
+              echo "| ZIP parts | ${PART_COUNT} |"
+              echo "| Total size | ${TOTAL_SIZE_MB} MB |"
+              echo "| Encryption | AES-256 |"
+              echo ""
+              echo "## Download Links"
+              echo ""
+              echo "Download all parts before extracting."
+              echo ""
+              echo "| # | File | Link |"
+              echo "|---|---|---|"
+              printf '%s' "$LINKS_MD"
+              echo ""
+              echo "## How to Extract"
+              echo ""
+              echo "Use 7-Zip on Windows. Open the first ZIP part and enter the password."
+              echo ""
+              echo "All other parts must be in the same folder."
+            } > "$README_FILE"
+
+            echo "Created ${PART_COUNT} ZIP part(s)."
+          done
+
+          # Create report.
           {
-            echo "Page: ${PAGE_NUMBER}"
+            echo "# ShizzleAI Page ${PAGE_NUMBER}"
+            echo ""
+            echo "Date: $(date -u)"
+            echo "Test mode: ${TEST_ONLY}"
+            echo ""
+
             if [ -f page_links.txt ]; then
               echo "Total links: $(wc -l < page_links.txt)"
             else
-              echo "Total links: 0 (link extraction did not produce page_links.txt)"
+              echo "Total links: 0"
             fi
-            if [ -f "$PAGE_DIR/downloaded.txt" ]; then
-              echo "Downloaded archive entries: $(wc -l < "$PAGE_DIR/downloaded.txt")"
-            else
-              echo "Downloaded archive entries: 0"
-            fi
+
+            echo "Videos archived: ${VIDEO_COUNT}"
+
             if [ -f "$PAGE_DIR/failed.txt" ]; then
               echo "Failed links: $(wc -l < "$PAGE_DIR/failed.txt")"
             else
               echo "Failed links: 0"
             fi
-            echo "Date: $(date -u)"
-          } > "$PAGE_DIR/report.txt"
+          } > "$BACKUP_DIR/report.txt"
 
-      - name: Commit and push page files
+          echo ""
+          echo "======================================"
+          echo "ARCHIVING COMPLETE"
+          echo "Videos archived: ${VIDEO_COUNT}"
+          echo "Backup directory: ${BACKUP_DIR}"
+          echo "======================================"
+
+      # --------------------------------------------------
+      # Commit and push
+      # --------------------------------------------------
+
+      - name: Commit and Push
         if: always()
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
 
-          git add -f "ShizzleAI_Videos/Page_${PAGE_NUMBER}"
+          BRANCH="${GITHUB_REF_NAME}"
+          PAGE_DIR="ShizzleAI_Videos/Page_${PAGE_NUMBER}"
 
-          git commit -m "Add ShizzleAI page ${PAGE_NUMBER}" || {
-            echo "Nothing new to commit"
-          }
+          if [ ! -f /tmp/shizzle_backup_path.txt ]; then
+            echo "No backup directory found."
+            exit 0
+          fi
 
-          git pull --rebase origin "${GITHUB_REF_NAME}"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          BACKUP_DIR=$(cat /tmp/shizzle_backup_path.txt)
+
+          if [ ! -d "$BACKUP_DIR" ]; then
+            echo "Backup directory does not exist."
+            exit 0
+          fi
+
+          echo "Backup directory: $BACKUP_DIR"
+
+          # Synchronize with remote before copying files.
+          git fetch origin "$BRANCH"
+
+          git rebase "origin/$BRANCH"
+
+          mkdir -p "$PAGE_DIR"
+
+          # Restore metadata.
+          for META in downloaded.txt failed.txt video_links.txt report.txt; do
+            if [ -f "$BACKUP_DIR/$META" ]; then
+              case "$META" in
+                video_links.txt)
+                  cp -f "$BACKUP_DIR/$META" "$PAGE_DIR/video_links.txt"
+                  ;;
+                report.txt)
+                  cp -f "$BACKUP_DIR/$META" "$PAGE_DIR/report.txt"
+                  ;;
+                *)
+                  cp -f "$BACKUP_DIR/$META" "$PAGE_DIR/$META"
+                  ;;
+              esac
+            fi
+          done
+
+          # Restore per-video folders and debug files.
+          for ITEM in "$BACKUP_DIR"/*; do
+            [ -e "$ITEM" ] || continue
+
+            NAME=$(basename "$ITEM")
+
+            case "$NAME" in
+              downloaded.txt|failed.txt|video_links.txt|report.txt)
+                continue
+                ;;
+            esac
+
+            if [ -d "$ITEM" ]; then
+              mkdir -p "$PAGE_DIR/$NAME"
+              cp -a "$ITEM"/. "$PAGE_DIR/$NAME/"
+            elif [ -f "$ITEM" ]; then
+              cp -f "$ITEM" "$PAGE_DIR/$NAME"
+            fi
+          done
+
+          # Generate master README.
+          MASTER_README="ShizzleAI_Videos/README.md"
+
+          mkdir -p ShizzleAI_Videos
+
+          {
+            echo "# ShizzleAI Videos"
+            echo ""
+            echo "Encrypted video archives."
+            echo ""
+          } > "$MASTER_README"
+
+          for PDIR in ShizzleAI_Videos/Page_*/; do
+            [ -d "$PDIR" ] || continue
+
+            PNAME=$(basename "$PDIR")
+
+            echo "## ${PNAME}" >> "$MASTER_README"
+            echo "" >> "$MASTER_README"
+
+            COUNT=0
+
+            for VDIR in "$PDIR"/*/; do
+              [ -d "$VDIR" ] || continue
+              [ -f "$VDIR/README.md" ] || continue
+
+              VNAME=$(basename "$VDIR")
+
+              printf -- "- [%s](./%s/%s)\n" \
+                "$VNAME" "$PNAME" "$VNAME" >> "$MASTER_README"
+
+              COUNT=$((COUNT + 1))
+            done
+
+            if [ "$COUNT" -eq 0 ]; then
+              echo "_No videos yet._" >> "$MASTER_README"
+            fi
+
+            echo "" >> "$MASTER_README"
+          done
+
+          # Stage files.
+          git add -fA "$PAGE_DIR" "$MASTER_README"
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Add ShizzleAI page ${PAGE_NUMBER} [skip ci]"
+
+          # Retry push if GitHub temporarily returns HTTP 500.
+          MAX_RETRIES=8
+          RETRY=0
+          PUSHED=false
+
+          while [ "$RETRY" -lt "$MAX_RETRIES" ]; do
+            RETRY=$((RETRY + 1))
+
+            echo ""
+            echo "======================================"
+            echo "Push attempt ${RETRY}/${MAX_RETRIES}"
+            echo "======================================"
+
+            if timeout 300 git push origin "HEAD:${BRANCH}"; then
+              PUSHED=true
+              echo "Push successful."
+              break
+            fi
+
+            echo "Push failed. Synchronizing and retrying..."
+
+            git fetch origin "$BRANCH"
+
+            # If the remote already received the commit but the
+            # connection dropped, this rebase will keep things in sync.
+            git rebase "origin/$BRANCH"
+
+            sleep $((5 + RANDOM % 10))
+          done
+
+          if [ "$PUSHED" != "true" ]; then
+            echo "ERROR: Push failed after ${MAX_RETRIES} attempts."
+            exit 1
+          fi
+
+          echo ""
+          echo "======================================"
+          echo "PUSH PROCESS COMPLETE"
+          echo "======================================"
+
+      # --------------------------------------------------
+      # Upload debug artifacts
+      # --------------------------------------------------
 
       - name: Upload debug files
         if: always()
