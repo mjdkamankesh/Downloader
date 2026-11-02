@@ -1,0 +1,9 @@
+Video: Red ＂Riding＂ Hood._3828.mp4
+Video ID: 3828
+Encryption: AES-256
+Split size: 45 MB
+
+Reassemble on Linux:
+cat "Red ＂Riding＂ Hood._3828.zip.part-"* > "Red ＂Riding＂ Hood._3828.zip"
+
+Open the reconstructed ZIP using 7-Zip and enter the password.
