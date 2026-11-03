@@ -1,10 +1,10 @@
 # ShizzleAI - All Pages
 
-- Search URL: https://rule34gen.com/search/shizzleai-/?sort_by=post_date
+- Search URL: https://rule34gen.com/members/7380/videos/
 - Test mode: false
-- Unique videos found: 134
-- Successfully pushed: 17
-- Already downloaded: 117
+- Unique videos found: 23
+- Successfully pushed: 23
+- Already downloaded: 0
 - Failed: 0
 - Archive format: ZIP
 - Encryption: AES-256
