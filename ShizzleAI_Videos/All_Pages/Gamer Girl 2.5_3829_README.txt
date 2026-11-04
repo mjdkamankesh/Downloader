@@ -1,9 +1,0 @@
-Video: Gamer Girl 2.5_3829.mp4
-Video ID: 3829
-Encryption: AES-256
-Split size: 45 MB
-
-Reassemble on Linux:
-cat "Gamer Girl 2.5_3829.zip.part-"* > "Gamer Girl 2.5_3829.zip"
-
-Open the reconstructed ZIP using 7-Zip and enter the password.
